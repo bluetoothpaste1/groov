@@ -35,6 +35,19 @@ static void TestApiError(void)
     GroovVkTrackListDestroy(&Tracks);
 }
 
+static void TestListReuse(void)
+{
+    const char Json[] = "{\"response\":{\"count\":0,\"items\":[]}}";
+    GroovVkTrackList Tracks = {0};
+    GroovVkError Error;
+
+    assert(GroovVkParseAudioResponse(Json, strlen(Json), &Tracks, &Error) == GROOV_VK_STATUS_OK);
+    assert(Tracks.Length == 0U);
+    assert(GroovVkParseAudioResponse(Json, strlen(Json), &Tracks, NULL) == GROOV_VK_STATUS_OK);
+    assert(Tracks.Length == 0U);
+    GroovVkTrackListDestroy(&Tracks);
+}
+
 static void TestMalformedResponse(void)
 {
     const char Json[] = "{\"response\":{\"items\":[}";
@@ -49,6 +62,7 @@ int main(void)
 {
     TestAudioResponse();
     TestApiError();
+    TestListReuse();
     TestMalformedResponse();
     return 0;
 }
