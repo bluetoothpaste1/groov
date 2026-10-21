@@ -136,8 +136,11 @@ GroovVkStatus GroovVkClientInit(
     GroovVkError *Error
 )
 {
+    GroovVkError LocalError;
     const char *Version = (ApiVersion == NULL || ApiVersion[0] == '\0')
         ? GROOV_VK_DEFAULT_API_VERSION : ApiVersion;
+
+    if (Error == NULL) Error = &LocalError;
 
     if (Client == NULL || AccessToken == NULL || AccessToken[0] == '\0') {
         GroovVkSetError(Error, GROOV_VK_STATUS_INVALID_ARGUMENT,
@@ -570,12 +573,15 @@ GroovVkStatus GroovVkParseAudioResponse(
     GroovVkError *Error
 )
 {
+    GroovVkError LocalError;
     GroovJsonCursor Cursor;
     bool First = true;
     bool HasResponse = false;
     char *Key = NULL;
     char *ErrorMessage = NULL;
     long long Number;
+
+    if (Error == NULL) Error = &LocalError;
 
     if (Json == NULL || Tracks == NULL) {
         GroovVkSetError(Error, GROOV_VK_STATUS_INVALID_ARGUMENT, "JSON and track list are required");
@@ -688,6 +694,7 @@ GroovVkStatus GroovVkClientListAudio(
     GroovVkError *Error
 )
 {
+    GroovVkError LocalError;
     CURL *Curl = NULL;
     CURLcode CurlResult;
     char *EscapedToken = NULL;
@@ -697,6 +704,8 @@ GroovVkStatus GroovVkClientListAudio(
     long HttpStatus = 0L;
     GroovHttpBuffer Body = {0};
     GroovVkStatus Status;
+
+    if (Error == NULL) Error = &LocalError;
 
     if (Client == NULL || Client->AccessToken == NULL || Tracks == NULL) {
         GroovVkSetError(Error, GROOV_VK_STATUS_INVALID_ARGUMENT, "client and track list are required");
@@ -728,7 +737,7 @@ GroovVkStatus GroovVkClientListAudio(
     (void)snprintf(Url, UrlLength, "%s?access_token=%s&v=%s&offset=%u&count=%u",
                    Client->BaseUrl, EscapedToken, EscapedVersion, Offset, Count);
     (void)curl_easy_setopt(Curl, CURLOPT_URL, Url);
-    (void)curl_easy_setopt(Curl, CURLOPT_USERAGENT, "groov/0.1 (+https://github.com/groov-player)");
+    (void)curl_easy_setopt(Curl, CURLOPT_USERAGENT, "groov/0.1");
     (void)curl_easy_setopt(Curl, CURLOPT_WRITEFUNCTION, GroovHttpWrite);
     (void)curl_easy_setopt(Curl, CURLOPT_WRITEDATA, &Body);
     (void)curl_easy_setopt(Curl, CURLOPT_CONNECTTIMEOUT, Client->ConnectTimeoutSeconds);
