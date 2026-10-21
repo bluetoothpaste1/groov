@@ -638,6 +638,7 @@ GroovVkStatus GroovVkParseAudioResponse(
     if (Error->ApiCode != 0) {
         GroovVkSetError(Error, GROOV_VK_STATUS_API, "%s", ErrorMessage == NULL ? "VK API request failed" : ErrorMessage);
         free(ErrorMessage);
+        GroovVkTrackListDestroy(Tracks);
         return Error->Status;
     }
     free(ErrorMessage);
