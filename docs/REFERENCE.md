@@ -12,12 +12,15 @@ groov [command] [arguments]
 
 Без команды запускается TUI. `help`, `--help` и `-h` печатают краткую справку.
 
+`groov version`, `groov --version` и `groov -V` печатают текущую версию.
+
 | Команда | Аргументы | Результат |
 |---|---|---|
 | `tui` | нет | открыть плеер |
 | `init` | нет | создать каталоги и default settings |
 | `paths` | нет | вывести XDG-пути |
 | `doctor` | нет | вывести диагностику |
+| `version` | нет | вывести версию |
 | `list` | `--tag TAG` повторяемый, `--json` | список библиотеки |
 | `scan` | нет | проверить библиотеку |
 | `add` | `FILE` и опции импорта | импортировать аудио |
@@ -262,6 +265,8 @@ stdin, stdout и stderr процесса изолированы. Пауза/пр
 | `GROOV_EVENT_JSON` | JSON object с event и song fields |
 | `GROOV_SONG_ID` | ID, если есть song |
 | `GROOV_SONG_FILE` | absolute/normalized path, если есть song |
+
+Если module field `rpc` равен true, stdin/stdout используются JSONL protocol; request/response schema и declarative widgets описаны в [MODULES.md](MODULES.md).
 
 `GROOV_EVENT_JSON` сейчас содержит:
 

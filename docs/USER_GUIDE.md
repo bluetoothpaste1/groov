@@ -43,6 +43,19 @@ make legacy
 build/groov-legacy --help
 ```
 
+Для локальной установки release binary и man page:
+
+```sh
+make release
+make install PREFIX="$HOME/.local"
+```
+
+Удаление установленных файлов:
+
+```sh
+make uninstall PREFIX="$HOME/.local"
+```
+
 ## Первый запуск
 
 Создайте каталоги и файл настроек:
@@ -91,6 +104,7 @@ groov использует XDG Base Directory:
 
 ```sh
 groov paths
+groov --version
 ```
 
 Внутри каталогов groov используются:
@@ -319,6 +333,8 @@ COMMAND отображается с префиксом `:`. Значения в 
 ```
 
 `:modules` и `:modules list` открывают список. `:modules info` открывает подробную панель; любая клавиша закрывает её.
+
+Для обычных env-модулей используйте examples/modules/hello. Для JSONL RPC и declarative UI views используйте examples/modules/rpc_dashboard.
 
 ## Темы
 

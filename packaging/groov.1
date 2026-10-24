@@ -1,0 +1,56 @@
+.TH GROOV 1 "2026-10-24" "groov 1.0.0" "User Commands"
+.SH NAME
+groov \- portable, extensible terminal music player
+.SH SYNOPSIS
+.B groov
+[COMMAND] [OPTIONS]
+.SH DESCRIPTION
+groov is a local keyboard-driven terminal music player. It stores songs in an XDG-compatible directory library, delegates audio to an external player, and supports language-independent modules.
+.SH COMMANDS
+.TP
+.B tui
+Open the player. This is the default command.
+.TP
+.B init
+Create configuration and data directories.
+.TP
+.B add FILE
+Import an audio file. Use --copy, --dry-run, --id, --title, --artist, --album, --desc, --tag, --image, and --lyrics.
+.TP
+.B edit ID
+Update existing song metadata.
+.TP
+.B list
+List songs. Use --tag and --json.
+.TP
+.B scan
+Validate the local library.
+.TP
+.B modules [list|on|off|info]
+List and manage installed modules.
+.TP
+.B theme [list|install|use]
+List, install, and activate themes.
+.TP
+.B doctor
+Print paths, player, library, module, theme, repeat, and image diagnostics.
+.TP
+.B version
+Print the current groov version.
+.SH FILES
+.TP
+.I ~/.config/groov/settings.json
+Configuration.
+.TP
+.I ~/.local/share/groov/songs
+Local song library.
+.TP
+.I ~/.config/groov/modules
+Module manifests.
+.TP
+.I ~/.config/groov/themes
+Theme files.
+.SH ENVIRONMENT
+XDG_CONFIG_HOME, XDG_DATA_HOME, and XDG_CACHE_HOME override the default directories. Modules receive GROOV_API_VERSION, GROOV_EVENT, GROOV_EVENT_JSON, GROOV_SONG_ID, and GROOV_SONG_FILE.
+.SH SEE ALSO
+The installed documentation and https://github.com/bluetoothpaste1/groov

@@ -1,10 +1,13 @@
 [package]
 name = "groov"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
-description = "A minimal, Vim-like terminal music player"
+description = "A portable, extensible terminal music player"
 license = "MIT"
 repository = "https://github.com/skripsaha/groov"
+readme = "README.md"
+keywords = ["terminal", "music", "player", "tui", "plugins"]
+categories = ["command-line-utilities", "multimedia::audio"]
 
 [dependencies]
 crossterm = "0.29.0"

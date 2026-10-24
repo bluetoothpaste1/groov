@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def markdown_files():
-    paths = [ROOT / "README.md"]
+    paths = [ROOT / "README.md", ROOT / "CHANGELOG.md"]
     paths.extend(sorted((ROOT / "docs").glob("*.md")))
     paths.extend(sorted((ROOT / "examples").rglob("*.md")))
     return paths

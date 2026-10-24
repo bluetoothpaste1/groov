@@ -2,6 +2,19 @@
 
 `groov` is a local music player for people who prefer a keyboard. It is a Vim-like TUI with a directory-based library, tag filters, cover art, a configurable audio backend, named themes, and a language-independent module API. The screen is rendered through Ratatui's buffered diff renderer, so unchanged cells are not rewritten on every timer tick.
 
+Current release: `1.0.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes and [LICENSE](LICENSE) for the MIT license.
+
+Source installation:
+
+```sh
+make release
+make install PREFIX="$HOME/.local"
+```
+
+The project CI checks Rust on Linux and macOS, the legacy C target on Linux, documentation links, formatting, clippy, tests, and release builds.
+
+Tagged builds use the `vX.Y.Z` convention. GitHub Actions packages Linux and macOS release archives with the architecture in the filename.
+
 The first implementation is written in Rust. The previous C VK experiment remains in `src/main.c` and `src/vk.c` and can still be built with `make legacy`; it is isolated from the local player.
 
 ## Build and run
@@ -12,6 +25,7 @@ Rust and Cargo are required. The default player command uses `ffplay` from FFmpe
 make
 make test
 make docs-check
+make release
 ./target/debug/groov init
 ./target/debug/groov add ~/Downloads/song.mp3
 ./target/debug/groov add ./keep-a-copy.mp3 --copy --tag archive
@@ -51,7 +65,7 @@ While a track is playing, the TUI shows its elapsed time and progress bar. `h` a
 
 In command mode, `Tab` completes command names, `set` fields, and paths for `image`/`lyrics`. Path completion understands both absolute paths and `~/...`.
 
-Settings can enable external modules with `modules[].command`; they receive playback events through `GROOV_EVENT`, `GROOV_EVENT_JSON`, `GROOV_SONG_ID`, and `GROOV_SONG_FILE`. A module can expose command aliases (`commands`) and key bindings (`keys`), set environment variables (`env`), choose a working directory (`cwd`), and restrict events with `events`. Standalone modules are discovered from `~/.config/groov/modules/<name>/module.json` and use their manifest directory as the default working directory, so a module can be written in Rust, Python, Lua, shell, or any other language without changing groov. The module process contract is versioned with `GROOV_API_VERSION=1`.
+Settings can enable external modules with `modules[].command`; they receive playback events through `GROOV_EVENT`, `GROOV_EVENT_JSON`, `GROOV_SONG_ID`, and `GROOV_SONG_FILE`. A module can expose command aliases (`commands`) and key bindings (`keys`), set environment variables (`env`), choose a working directory (`cwd`), enable JSONL RPC views (`rpc`), and restrict events with `events`. RPC modules can return status, overlays, paragraphs, lists, gauges, and redraw messages to the TUI. Standalone modules are discovered from `~/.config/groov/modules/<name>/module.json` and use their manifest directory as the default working directory, so a module can be written in Rust, Python, Lua, shell, or any other language without changing groov. The module process contract is versioned with `GROOV_API_VERSION=1`.
 
 Manage modules from COMMAND mode with `:modules` or `:modules list`, `:modules on NAME`, `:modules off NAME`, and `:modules info NAME`. The module panel shows the manifest path, working directory, metadata, commands, key bindings, events, and environment. The same operations are available from the CLI as `groov modules`, `groov modules on NAME`, `groov modules off NAME`, and `groov modules info NAME`. A complete reference extension lives in [`examples/modules/hello`](examples/modules/hello).
 

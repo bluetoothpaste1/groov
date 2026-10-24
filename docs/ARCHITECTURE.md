@@ -49,6 +49,7 @@ Paths in metadata are relative to the song directory. Missing `Lyrics` or `Image
       "version": "1.0.0",
       "description": "A playback scrobbler",
       "author": "Example author",
+      "rpc": false,
       "enabled": true,
       "command": "groov-scrobbler",
       "args": ["{event}", "{id}"],
@@ -61,7 +62,7 @@ Paths in metadata are relative to the song directory. Missing `Lyrics` or `Image
 }
 ```
 
-The `modules` array is intentionally data-driven. Each entry has a stable `name`, `enabled` flag, optional `command`, `args`, `events`, `commands`, `keys`, `env`, and `cwd`. Enabled command modules receive `GROOV_API_VERSION=1`, `GROOV_EVENT` (`play`, `stop`, `rescan`, or `metadata`), `GROOV_EVENT_JSON`, `GROOV_SONG_ID`, and `GROOV_SONG_FILE`; `{event}`, `{id}`, and `{file}` are expanded in arguments and environment values. A command alias is started when its name is entered after `:`. A key binding invokes the same alias directly from NORMAL mode. Standalone manifests at `$XDG_CONFIG_HOME/groov/modules/<name>/module.json` are discovered and merged with settings; their directory becomes the default `cwd`, so relative executables work. This process boundary lets modules be written in any language and keeps a broken module from taking down the TUI.
+The `modules` array is intentionally data-driven. Each entry has a stable `name`, `enabled` flag, optional `command`, `args`, `events`, `commands`, `keys`, `env`, `cwd`, and `rpc`. Enabled command modules receive `GROOV_API_VERSION=1`, `GROOV_EVENT` (`play`, `stop`, `rescan`, or `metadata`), `GROOV_EVENT_JSON`, `GROOV_SONG_ID`, and `GROOV_SONG_FILE`; `{event}`, `{id}`, and `{file}` are expanded in arguments and environment values. A command alias is started when its name is entered after `:`. A key binding invokes the same alias directly from NORMAL mode. Standalone manifests at `$XDG_CONFIG_HOME/groov/modules/<name>/module.json` are discovered and merged with settings; their directory becomes the default `cwd`, so relative executables work. With `rpc: true`, the process receives a JSONL request and can return status, overlay, paragraph, list, gauge, or redraw messages to the TUI. This process boundary lets modules be written in any language and keeps a broken module from taking down the TUI.
 
 Module management is available without restarting groov: `:modules` (or `:modules list`) lists all modules, `:modules on name` and `:modules off name` persist activation, and `:modules info name` opens a full metadata panel with the source manifest path, working directory, command, hooks, aliases, key bindings, and environment. The CLI exposes the same registry as `groov modules [on|off|info]`. The reference extension in `examples/modules/hello` is intentionally small and can be copied into the user's module directory as a starting point.
 

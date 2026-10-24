@@ -25,9 +25,16 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
     let command = args.next().unwrap_or_else(|| "tui".into());
+    if matches!(command.as_str(), "help" | "--help" | "-h") {
+        print_help();
+        return Ok(());
+    }
+    if matches!(command.as_str(), "version" | "--version" | "-V") {
+        println!("groov {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let paths = AppPaths::discover()?;
     match command.as_str() {
-        "help" | "--help" | "-h" => print_help(),
         "init" => init(&paths)?,
         "paths" => println!("{}", paths.describe()),
         "doctor" => doctor(&paths)?,
@@ -51,6 +58,7 @@ fn print_help() {
     println!("groov — minimal Vim-like terminal music player");
     println!();
     println!("Usage: groov [command]");
+    println!("       groov --version");
     println!();
     println!("Commands:");
     println!("  tui                         open the player (default)");
@@ -61,6 +69,7 @@ fn print_help() {
     println!("  scan                        validate and count the local library");
     println!("  paths                       print resolved XDG paths");
     println!("  doctor                      show setup and player diagnostics");
+    println!("  version                     print the groov version");
     println!("  theme list|install|use      list, install, or activate a color theme");
     println!("  modules [on|off|info] NAME  list or manage installed modules");
     println!();

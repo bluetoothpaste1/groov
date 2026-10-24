@@ -11,6 +11,7 @@
 - использовать собственные environment variables;
 - работать из собственного каталога;
 - хранить любые дополнительные metadata;
+- отправлять JSONL RPC-ответы, из которых groov рендерит status, overlays, paragraphs, lists и gauges;
 - включаться, выключаться и перечитываться без перезапуска groov.
 
 Это поведенческий plugin API. Модуль намеренно не загружается внутрь процесса groov и не получает прямой доступ к внутренним Rust-структурам. Процессная граница предотвращает падение TUI из-за ошибки расширения и позволяет сохранять совместимость между языками и версиями.
@@ -107,6 +108,7 @@ $XDG_CONFIG_HOME/groov/modules/<module-name>/module.json
   "author": "Author or team",
   "homepage": "https://example.invalid/module",
   "enabled": true,
+  "rpc": true,
   "command": "python3",
   "args": ["main.py", "{event}", "{id}"],
   "events": ["play", "stop", "metadata"],
@@ -136,6 +138,7 @@ $XDG_CONFIG_HOME/groov/modules/<module-name>/module.json
 | author | string | пустая строка | автор |
 | homepage | string | пустая строка | ссылка на проект |
 | enabled | boolean | false | отправлять events и разрешать commands |
+| rpc | boolean | false | включить JSONL request/response protocol |
 | command | string или null | null | executable, который запускается |
 | args | array<string> | [] | аргументы event hook |
 | events | array<string> | [] | фильтр событий; пустой список означает все |
@@ -171,6 +174,8 @@ command обязателен только для реально запускае
 6. запускает процесс detached и ждёт его в отдельном waiter thread.
 
 stdout и stderr перенаправлены в null, поэтому логирование нужно настроить в самом модуле: файл, системный logger или собственное перенаправление.
+
+Если rpc равно true, stdin/stdout используются для JSONL RPC и не являются обычным логом. Для обычных env-модулей rpc оставляйте false.
 
 ### Command alias
 
@@ -285,6 +290,86 @@ GROOV_EVENT=command:lyrics
 Interpolation выполняется до передачи аргументов в Command; аргументы не объединяются в shell string. Это позволяет передавать путь с пробелами как один аргумент.
 
 Если song context отсутствует, {event} заменяется, а {id}/{file} остаются без изменений.
+
+## JSONL RPC protocol
+
+RPC включается явно:
+
+~~~json
+{
+  "name": "dashboard",
+  "version": "1.0.0",
+  "enabled": true,
+  "rpc": true,
+  "command": "python3",
+  "args": ["dashboard.py"],
+  "commands": [
+    { "name": "dashboard", "args": [] }
+  ],
+  "events": ["play", "metadata"]
+}
+~~~
+
+На каждый event или command groov запускает модуль, отправляет одну JSON request line и читает JSON response lines до завершения процесса. Request имеет форму:
+
+~~~json
+{
+  "api_version": 1,
+  "type": "event",
+  "event": "play",
+  "args": [],
+  "song": {
+    "id": "13",
+    "file": "/music/song.mp3",
+    "title": "Song",
+    "artist": "Artist",
+    "album": "Album",
+    "description": "Note",
+    "tags": ["rock"],
+    "duration": 120
+  }
+}
+~~~
+
+Для command alias type равен command, а event имеет вид command:NAME. song может быть null.
+
+Каждая непустая response line — JSON object. Поддерживаемые view types:
+
+| type | Поля | Результат в TUI |
+|---|---|---|
+| status | text | строка состояния |
+| error | text | ошибка в строке состояния |
+| overlay | text или body, title | полноэкранная текстовая панель |
+| paragraph | text, title | текстовый widget |
+| list | lines, title | список строк |
+| gauge | value, max, text, title | progress gauge |
+| redraw | нет | запросить новый render pass |
+
+Пример RPC-модуля:
+
+~~~python
+import json
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    song = request.get("song") or {}
+    if request.get("type") == "event":
+        print(json.dumps({
+            "type": "status",
+            "text": "playing: " + song.get("title", "unknown")
+        }), flush=True)
+    else:
+        print(json.dumps({
+            "type": "paragraph",
+            "title": "Module response",
+            "text": json.dumps(request, indent=2)
+        }), flush=True)
+~~~
+
+Неизвестные response types не ломают groov: они превращаются в диагностическое сообщение, а unknown fields сохраняются в parsed data. Это оставляет пространство для новых declarative widgets без поломки старого host.
+
+Текущий RPC — request/response foundation с отдельным процессом на сообщение. Долгоживущие sessions, streaming notifications и произвольные custom Ratatui widgets требуют следующей версии protocol; v1 уже задаёт безопасную точку расширения для них.
 
 ## Примеры реализации
 
@@ -462,4 +547,4 @@ GROOV_API_VERSION=1 — версия environment contract. Модуль долж
 
 ## Ограничения текущего API
 
-Модульный API сейчас расширяет команды, key bindings, process hooks и интеграции. Он не добавляет произвольные Ratatui widgets напрямую и не получает bidirectional RPC-канал с TUI. Это сознательная граница безопасности и стабильности. Если нужен новый тип UI-возможности, его сначала нужно добавить в core extension API, покрыть тестами и задокументировать здесь.
+Модульный API расширяет команды, key bindings, process hooks и интеграции, а JSONL RPC уже позволяет возвращать декларативные status, overlay, paragraph, list и gauge views. Произвольный Rust Ratatui widget напрямую не загружается, а RPC-сессия сейчас request/response и запускает отдельный process на сообщение. Долгоживущие sessions, streaming notifications и custom widget schema можно добавить совместимо в следующей версии protocol; v1 оставляет для этого явные type/data границы.

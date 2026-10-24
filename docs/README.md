@@ -10,6 +10,8 @@
 - [Руководство разработчика](DEVELOPMENT.md) — устройство исходников, сборка, тесты, изменение API и обязательные правила обновления документации.
 - [Архитектурные решения](ARCHITECTURE.md) — долговечные контракты хранения, расширений, рендера и выбора языка.
 - 
+- [Changelog](../CHANGELOG.md) — история релизов и release notes.
+- [License](../LICENSE) — лицензия MIT.
 
 ## Быстрые ссылки
 
@@ -21,9 +23,13 @@ groov modules info NAME            подробности модуля
 groov theme list                   список тем
 groov doctor                       диагностика
 make docs-check                    проверить ссылки и code fences
+make release                       собрать release binary
+make install PREFIX=~/.local       установить binary и man page
 ```
 
 Для первого расширения используйте [тестовый модуль hello](../examples/modules/hello/README.md).
+
+Для declarative UI/RPC используйте [rpc-dashboard](../examples/modules/rpc_dashboard/README.md).
 
 ## Статус документации
 

@@ -27,6 +27,10 @@
 | include/groov/vk.h | legacy VK public C API |
 | tests/test_vk.c | legacy C tests |
 | examples/modules/hello | reference extension |
+| packaging/groov.1 | installed manual page |
+| scripts/check_docs.py | dependency-free documentation check |
+| .github/workflows/ci.yml | Linux/macOS Rust and Linux legacy CI |
+| .github/workflows/release.yml | tagged Linux/macOS binary artifacts |
 
 ## Архитектура приложения
 
@@ -140,6 +144,16 @@ make legacy
 
 Legacy target требует C compiler и libcurl. Rust target от него не зависит.
 
+Release binary and local installation:
+
+~~~sh
+make release
+make install PREFIX="$HOME/.local"
+make uninstall PREFIX="$HOME/.local"
+~~~
+
+The install target copies the release binary and groov.1 manual page. It does not modify configuration or user data. Package maintainers can use target/release/groov and packaging/groov.1 as source artifacts.
+
 ## Проверки перед изменением
 
 Минимальный набор:
@@ -170,6 +184,8 @@ groov modules info hello
 groov modules off hello
 groov modules on hello
 ~~~
+
+GitHub Actions repeats the Rust checks on Ubuntu and macOS and builds/tests the legacy C target on Ubuntu. A pull request is not ready until these jobs are green.
 
 ## Тестирование
 
@@ -257,3 +273,6 @@ External process failures должны стать user-visible status или д�
 7. Обновить docs и examples.
 8. Проверить CREDITS и dependency changes.
 9. Убедиться, что target/build/cache не попали в patch.
+10. Убедиться, что Cargo.toml version, CHANGELOG.md и packaging/groov.1 согласованы.
+
+Tagged releases use the `vX.Y.Z` convention. The release workflow packages Linux and macOS archives with the runner architecture in the filename. Each archive contains the binary, license, README, changelog, and man page.

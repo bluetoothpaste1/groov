@@ -112,6 +112,17 @@ struct ImageResult {
     protocol: Option<Box<dyn StatefulProtocol>>,
 }
 
+#[derive(Debug, Clone)]
+struct ModuleWidget {
+    module: String,
+    kind: String,
+    title: String,
+    text: String,
+    lines: Vec<String>,
+    value: f64,
+    max: f64,
+}
+
 struct App {
     paths: AppPaths,
     settings: Settings,
@@ -145,11 +156,15 @@ struct App {
     image_generation: u64,
     image_requests: Sender<ImageRequest>,
     image_results: Receiver<ImageResult>,
+    module_output_tx: Sender<modules::ModuleOutput>,
+    module_outputs: Receiver<modules::ModuleOutput>,
+    module_widget: Option<ModuleWidget>,
 }
 
 impl App {
     fn new(paths: AppPaths, settings: Settings, songs: Vec<Song>) -> Self {
         let (image_requests, image_results) = spawn_image_worker();
+        let (module_output_tx, module_outputs) = mpsc::channel();
         let repeat = settings.repeat;
         let mut app = Self {
             paths,
@@ -184,6 +199,9 @@ impl App {
             image_generation: 0,
             image_requests,
             image_results,
+            module_output_tx,
+            module_outputs,
+            module_widget: None,
         };
         app.refresh_visible();
         app
@@ -250,7 +268,15 @@ impl App {
         }
         self.configure_image_picker();
         let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
+        let mut terminal = match Terminal::new(backend) {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                let mut cleanup_stdout = io::stdout();
+                let _ = execute!(cleanup_stdout, Show, LeaveAlternateScreen);
+                let _ = terminal::disable_raw_mode();
+                return Err(error.into());
+            }
+        };
         let result = self.event_loop(&mut terminal);
         player::stop(&mut self.player);
         let cursor_error = terminal.show_cursor().err();
@@ -269,6 +295,9 @@ impl App {
         let mut dirty = true;
         loop {
             if self.receive_image_results() {
+                dirty = true;
+            }
+            if self.receive_module_outputs() {
                 dirty = true;
             }
             if dirty {
@@ -319,6 +348,9 @@ impl App {
             if self.receive_image_results() {
                 dirty = true;
             }
+            if self.receive_module_outputs() {
+                dirty = true;
+            }
             if self.player.is_some() && self.playback_started.is_some() && !self.paused {
                 dirty = true;
             }
@@ -327,8 +359,9 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
-        if self.module_info.is_some() {
+        if self.module_info.is_some() || self.module_widget.is_some() {
             self.module_info = None;
+            self.module_widget = None;
             return false;
         }
         if self.show_help {
@@ -629,7 +662,12 @@ impl App {
                 self.playback_started = Some(Instant::now());
                 self.playback_offset_seconds = offset_seconds;
                 self.status = format!("playing {} — {}", song.info.artist, song.info.title);
-                modules::emit(&self.settings, "play", Some(song));
+                modules::emit_with_output(
+                    &self.settings,
+                    "play",
+                    Some(song),
+                    Some(&self.module_output_tx),
+                );
             }
             Err(error) => {
                 self.playback_started = None;
@@ -678,7 +716,12 @@ impl App {
 
     fn stop_playback(&mut self) {
         let current = self.playing.and_then(|index| self.songs.get(index));
-        modules::emit(&self.settings, "stop", current);
+        modules::emit_with_output(
+            &self.settings,
+            "stop",
+            current,
+            Some(&self.module_output_tx),
+        );
         player::stop(&mut self.player);
         self.playing = None;
         self.playback_started = None;
@@ -779,9 +822,13 @@ impl App {
             self.handle_modules_command(args);
             return;
         }
-        if let Some(result) =
-            modules::dispatch_command(&self.settings, command, args, self.selected_song())
-        {
+        if let Some(result) = modules::dispatch_command_with_output(
+            &self.settings,
+            command,
+            args,
+            self.selected_song(),
+            Some(&self.module_output_tx),
+        ) {
             self.status = result.unwrap_or_else(|error| error);
             return;
         }
@@ -877,7 +924,12 @@ impl App {
                     self.paused_at = None;
                     self.refresh_visible();
                     self.status = "library rescanned".into();
-                    modules::emit(&self.settings, "rescan", None);
+                    modules::emit_with_output(
+                        &self.settings,
+                        "rescan",
+                        None,
+                        Some(&self.module_output_tx),
+                    );
                 }
                 Err(error) => self.status = error.to_string(),
             },
@@ -1103,7 +1155,12 @@ impl App {
                 self.songs[index].refresh_optional_files();
                 self.refresh_visible();
                 self.status = format!("updated song {id}");
-                modules::emit(&self.settings, "metadata", self.songs.get(index));
+                modules::emit_with_output(
+                    &self.settings,
+                    "metadata",
+                    self.songs.get(index),
+                    Some(&self.module_output_tx),
+                );
             }
             Err(error) => self.status = error.to_string(),
         }
@@ -1202,11 +1259,12 @@ impl App {
         let Some(command) = tokens.first() else {
             return;
         };
-        let result = modules::dispatch_command(
+        let result = modules::dispatch_command_with_output(
             &self.settings,
             command,
             tokens.get(1..).unwrap_or(&[]),
             self.selected_song(),
+            Some(&self.module_output_tx),
         );
         if result.is_none() {
             self.input = action.to_string();
@@ -1245,7 +1303,12 @@ impl App {
                 self.songs[index].refresh_optional_files();
                 self.refresh_visible();
                 self.status = format!("updated song {id}");
-                modules::emit(&self.settings, event, self.songs.get(index));
+                modules::emit_with_output(
+                    &self.settings,
+                    event,
+                    self.songs.get(index),
+                    Some(&self.module_output_tx),
+                );
             }
             Err(error) => self.status = error.to_string(),
         }
@@ -1302,6 +1365,56 @@ impl App {
                 self.image_protocol = result.protocol;
                 self.image_pending = false;
                 changed = true;
+            }
+        }
+        changed
+    }
+
+    fn receive_module_outputs(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(output) = self.module_outputs.try_recv() {
+            changed = true;
+            match output.kind.as_str() {
+                "status" => {
+                    self.status = if output.text.is_empty() {
+                        format!("module {} completed", output.module)
+                    } else {
+                        output.text
+                    };
+                }
+                "error" => {
+                    self.status = if output.text.is_empty() {
+                        format!("module {} reported an error", output.module)
+                    } else {
+                        format!("module {}: {}", output.module, output.text)
+                    };
+                }
+                "overlay" => {
+                    let body = if output.text.is_empty() {
+                        output.lines.join("\n")
+                    } else {
+                        output.text
+                    };
+                    self.module_info = Some(format!("module: {}\n\n{}", output.module, body));
+                }
+                "paragraph" | "list" | "gauge" => {
+                    self.module_widget = Some(ModuleWidget {
+                        module: output.module,
+                        kind: output.kind,
+                        title: output.title,
+                        text: output.text,
+                        lines: output.lines,
+                        value: output.value,
+                        max: output.max,
+                    });
+                }
+                "redraw" => {}
+                _ => {
+                    self.status = format!(
+                        "module {} sent unknown view type {}: {}",
+                        output.module, output.kind, output.data
+                    );
+                }
             }
         }
         changed
@@ -1454,6 +1567,9 @@ impl App {
         if let Some(info) = self.module_info.as_deref() {
             self.draw_module_info(frame, palette, info);
         }
+        if let Some(widget) = self.module_widget.as_ref() {
+            self.draw_module_widget(frame, palette, widget);
+        }
     }
 
     fn draw_details(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -1587,6 +1703,64 @@ impl App {
                 .wrap(ratatui::widgets::Wrap { trim: false }),
             area,
         );
+    }
+
+    fn draw_module_widget(&self, frame: &mut Frame<'_>, palette: Palette, widget: &ModuleWidget) {
+        let area = centered_rect(76, 48, frame.area());
+        frame.render_widget(Clear, area);
+        let title = if widget.title.is_empty() {
+            format!(" Module: {} ", widget.module)
+        } else {
+            format!(" {} ", widget.title)
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.border))
+            .title(title);
+        match widget.kind.as_str() {
+            "gauge" => {
+                let ratio = if widget.max <= 0.0 {
+                    0.0
+                } else {
+                    (widget.value / widget.max).clamp(0.0, 1.0)
+                };
+                frame.render_widget(
+                    Gauge::default()
+                        .block(block)
+                        .gauge_style(Style::default().fg(palette.accent))
+                        .ratio(ratio)
+                        .label(widget.text.clone()),
+                    area,
+                );
+            }
+            "list" => {
+                let text = widget.lines.join("\n");
+                frame.render_widget(
+                    Paragraph::new(text)
+                        .block(block)
+                        .style(
+                            Style::default()
+                                .fg(palette.foreground)
+                                .bg(palette.background),
+                        )
+                        .wrap(ratatui::widgets::Wrap { trim: false }),
+                    area,
+                );
+            }
+            _ => {
+                frame.render_widget(
+                    Paragraph::new(widget.text.clone())
+                        .block(block)
+                        .style(
+                            Style::default()
+                                .fg(palette.foreground)
+                                .bg(palette.background),
+                        )
+                        .wrap(ratatui::widgets::Wrap { trim: false }),
+                    area,
+                );
+            }
+        }
     }
 }
 
@@ -2088,5 +2262,34 @@ mod tests {
         app.execute_command();
         assert!(app.settings.modules[0].enabled);
         assert!(paths.settings_file.is_file());
+    }
+
+    #[test]
+    fn rpc_views_are_applied_to_tui_state() {
+        let temp = tempdir().unwrap();
+        let paths = AppPaths {
+            config_dir: temp.path().join("config"),
+            settings_file: temp.path().join("config/settings.json"),
+            data_dir: temp.path().join("data"),
+            songs_dir: temp.path().join("data/songs"),
+            cache_dir: temp.path().join("cache"),
+        };
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        let mut app = App::new(paths, Settings::default(), Vec::new());
+        app.module_output_tx
+            .send(crate::modules::ModuleOutput {
+                module: "rpc".into(),
+                kind: "gauge".into(),
+                title: "Progress".into(),
+                text: "50%".into(),
+                lines: Vec::new(),
+                value: 5.0,
+                max: 10.0,
+                data: serde_json::json!({"type":"gauge"}),
+            })
+            .unwrap();
+        assert!(app.receive_module_outputs());
+        assert_eq!(app.module_widget.as_ref().unwrap().kind, "gauge");
+        assert_eq!(app.module_widget.as_ref().unwrap().value, 5.0);
     }
 }

@@ -101,3 +101,25 @@ fn signal_continue() -> i32 {
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::start;
+    use crate::config::Settings;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn starts_a_backend_with_quoted_file_and_start_placeholders() {
+        let temp = tempdir().unwrap();
+        let audio = temp.path().join("track with spaces.mp3");
+        fs::write(&audio, b"test").unwrap();
+        let settings = Settings {
+            player_command: "test \"{start}\" = 7 && test -f {file}".into(),
+            ..Settings::default()
+        };
+        let mut child = start(&settings, &audio, 7).unwrap();
+        let status = child.wait().unwrap();
+        assert!(status.success());
+    }
+}

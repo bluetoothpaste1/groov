@@ -68,6 +68,9 @@ pub struct ModuleConfig {
     pub homepage: String,
     #[serde(default)]
     pub enabled: bool,
+    /// Use the JSONL request/response protocol instead of fire-and-forget env hooks.
+    #[serde(default)]
+    pub rpc: bool,
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
@@ -261,6 +264,9 @@ fn load_module_manifests(paths: &AppPaths, settings: &mut Settings) -> Result<()
             if existing.command.is_none() {
                 existing.command = module.command;
             }
+            if !existing.rpc {
+                existing.rpc = module.rpc;
+            }
             if existing.version.is_empty() {
                 existing.version = module.version;
             }
@@ -396,7 +402,7 @@ fn _path_exists(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{load, theme_exists, write_default, Settings};
+    use super::{load, theme_exists, write_default, write_settings, Settings};
     use crate::paths::AppPaths;
     use std::fs;
     use tempfile::tempdir;
@@ -465,5 +471,48 @@ mod tests {
         assert!(!module.enabled);
         assert_eq!(module.commands[0].name, "hello");
         assert_eq!(module.keys.get("H").map(String::as_str), Some("hello"));
+    }
+
+    #[test]
+    fn rpc_reference_manifest_enables_jsonl_views() {
+        let module: super::ModuleConfig = serde_json::from_str(include_str!(
+            "../examples/modules/rpc_dashboard/module.json"
+        ))
+        .unwrap();
+        assert!(module.rpc);
+        assert_eq!(module.commands[0].name, "dashboard");
+        assert_eq!(module.keys.get("D").map(String::as_str), Some("dashboard"));
+    }
+
+    #[test]
+    fn older_settings_load_with_new_defaults() {
+        let temp = tempdir().unwrap();
+        let app_paths = paths(temp.path());
+        fs::create_dir_all(&app_paths.config_dir).unwrap();
+        fs::write(
+            &app_paths.settings_file,
+            r#"{"refresh_ms":100,"theme":"monochrome","player_command":"true"}"#,
+        )
+        .unwrap();
+        let settings = load(&app_paths).unwrap();
+        assert!(!settings.repeat);
+        assert!(settings.modules.is_empty());
+        assert_eq!(settings.cover_size, 16);
+    }
+
+    #[test]
+    fn unknown_settings_keys_survive_a_round_trip() {
+        let temp = tempdir().unwrap();
+        let app_paths = paths(temp.path());
+        fs::create_dir_all(&app_paths.config_dir).unwrap();
+        fs::write(
+            &app_paths.settings_file,
+            r#"{"future_feature":{"enabled":true}}"#,
+        )
+        .unwrap();
+        let settings = load(&app_paths).unwrap();
+        write_settings(&app_paths, &settings).unwrap();
+        let text = fs::read_to_string(app_paths.settings_file).unwrap();
+        assert!(text.contains("future_feature"));
     }
 }

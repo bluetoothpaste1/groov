@@ -1,0 +1,45 @@
+name: Release artifacts
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+          - os: macos-latest
+            label: macos
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Build release binary
+        run: cargo +stable build --release --locked
+      - name: Package
+        shell: bash
+        run: |
+          arch="$(uname -m)"
+          package="groov-${GITHUB_REF_NAME}-${{ matrix.label }}-${arch}"
+          mkdir -p "dist/${package}"
+          cp target/release/groov "dist/${package}/groov"
+          cp LICENSE README.md CHANGELOG.md "dist/${package}/"
+          cp packaging/groov.1 "dist/${package}/"
+          chmod 755 "dist/${package}/groov"
+          tar -C dist -czf "${package}.tar.gz" "${package}"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: groov-${{ matrix.label }}
+          path: dist/*.tar.gz

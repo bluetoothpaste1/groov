@@ -1,0 +1,17 @@
+{
+  "name": "rpc-dashboard",
+  "version": "1.0.0",
+  "description": "Reference JSONL RPC view module.",
+  "author": "groov contributors",
+  "enabled": false,
+  "rpc": true,
+  "command": "python3",
+  "args": ["dashboard.py"],
+  "events": ["play", "metadata"],
+  "commands": [
+    { "name": "dashboard", "args": [] }
+  ],
+  "keys": {
+    "D": "dashboard"
+  }
+}
