@@ -266,7 +266,7 @@ stdin, stdout и stderr процесса изолированы. Пауза/пр
 | `GROOV_SONG_ID` | ID, если есть song |
 | `GROOV_SONG_FILE` | absolute/normalized path, если есть song |
 
-Если module field `rpc` равен true, stdin/stdout используются JSONL protocol; request/response schema и declarative widgets описаны в [MODULES.md](MODULES.md).
+Если module field `rpc` равен true, stdin/stdout используются JSONL protocol. При `session: true` один process принимает последовательность requests, включая input/key messages; request/response schema и declarative widgets описаны в [MODULES.md](MODULES.md).
 
 `GROOV_EVENT_JSON` сейчас содержит:
 

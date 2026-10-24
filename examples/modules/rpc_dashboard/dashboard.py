@@ -5,7 +5,12 @@ import sys
 for line in sys.stdin:
     request = json.loads(line)
     song = request.get("song") or {}
-    if request.get("type") == "event":
+    if request.get("type") == "input":
+        response = {
+            "type": "status",
+            "text": "RPC key: " + request.get("key", "?"),
+        }
+    elif request.get("type") == "event":
         response = {
             "type": "status",
             "text": "RPC: " + song.get("title", "no track"),

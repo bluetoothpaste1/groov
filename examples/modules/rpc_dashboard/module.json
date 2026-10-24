@@ -5,6 +5,7 @@
   "author": "groov contributors",
   "enabled": false,
   "rpc": true,
+  "session": true,
   "command": "python3",
   "args": ["dashboard.py"],
   "events": ["play", "metadata"],

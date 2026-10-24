@@ -109,6 +109,7 @@ $XDG_CONFIG_HOME/groov/modules/<module-name>/module.json
   "homepage": "https://example.invalid/module",
   "enabled": true,
   "rpc": true,
+  "session": true,
   "command": "python3",
   "args": ["main.py", "{event}", "{id}"],
   "events": ["play", "stop", "metadata"],
@@ -139,6 +140,7 @@ $XDG_CONFIG_HOME/groov/modules/<module-name>/module.json
 | homepage | string | пустая строка | ссылка на проект |
 | enabled | boolean | false | отправлять events и разрешать commands |
 | rpc | boolean | false | включить JSONL request/response protocol |
+| session | boolean | false | держать RPC process живым между сообщениями |
 | command | string или null | null | executable, который запускается |
 | args | array<string> | [] | аргументы event hook |
 | events | array<string> | [] | фильтр событий; пустой список означает все |
@@ -369,7 +371,9 @@ for line in sys.stdin:
 
 Неизвестные response types не ломают groov: они превращаются в диагностическое сообщение, а unknown fields сохраняются в parsed data. Это оставляет пространство для новых declarative widgets без поломки старого host.
 
-Текущий RPC — request/response foundation с отдельным процессом на сообщение. Долгоживущие sessions, streaming notifications и произвольные custom Ratatui widgets требуют следующей версии protocol; v1 уже задаёт безопасную точку расширения для них.
+При session: true процесс запускается один раз, принимает последовательность JSON requests и может отправлять streaming response lines. Request type input используется для передачи key events активному view. Session-модуль должен закрыть stdin и завершиться при остановке host.
+
+Widget tree поддерживает paragraph, list, gauge, row, column, stack и вложенные children с flex/direction. Это declarative слой поверх Ratatui: host остаётся владельцем terminal buffer, layout и lifecycle, а модуль владеет данными и состоянием view.
 
 ## Примеры реализации
 

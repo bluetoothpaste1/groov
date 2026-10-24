@@ -1,7 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::config::Settings;
@@ -20,11 +21,101 @@ pub struct ModuleOutput {
     pub value: f64,
     pub max: f64,
     pub data: Value,
+    pub flush: bool,
+    pub widget: Option<ModuleWidgetNode>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleWidgetNode {
+    pub module: String,
+    pub kind: String,
+    pub title: String,
+    pub text: String,
+    pub lines: Vec<String>,
+    pub value: f64,
+    pub max: f64,
+    pub direction: String,
+    pub flex: u16,
+    pub children: Vec<ModuleWidgetNode>,
+}
+
+impl ModuleWidgetNode {
+    fn from_value(module: &str, value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        let kind = object
+            .get("kind")
+            .or_else(|| object.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("paragraph")
+            .to_string();
+        let children = object
+            .get("children")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| Self::from_value(module, item))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(Self {
+            module: module.to_string(),
+            kind,
+            title: object
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            text: object
+                .get("text")
+                .or_else(|| object.get("body"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            lines: object
+                .get("lines")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            value: object.get("value").and_then(Value::as_f64).unwrap_or(0.0),
+            max: object.get("max").and_then(Value::as_f64).unwrap_or(1.0),
+            direction: object
+                .get("direction")
+                .and_then(Value::as_str)
+                .unwrap_or("column")
+                .to_string(),
+            flex: object
+                .get("flex")
+                .and_then(Value::as_u64)
+                .unwrap_or(1)
+                .clamp(1, u16::MAX as u64) as u16,
+            children,
+        })
+    }
 }
 
 impl ModuleOutput {
     fn parse(module: &str, value: Value) -> Option<Self> {
         let object = value.as_object()?;
+        let flush = object.get("flush").and_then(Value::as_bool).unwrap_or(true);
+        let kind = object
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("status");
+        let widget_value = object.get("widget").or_else(|| object.get("root"));
+        let widget = widget_value
+            .and_then(|value| ModuleWidgetNode::from_value(module, value))
+            .or_else(|| {
+                matches!(kind, "paragraph" | "list" | "gauge")
+                    .then(|| ModuleWidgetNode::from_value(module, &value))
+                    .flatten()
+            });
         Some(Self {
             module: module.to_string(),
             kind: object
@@ -57,7 +148,132 @@ impl ModuleOutput {
             value: object.get("value").and_then(Value::as_f64).unwrap_or(0.0),
             max: object.get("max").and_then(Value::as_f64).unwrap_or(1.0),
             data: value,
+            flush,
+            widget,
         })
+    }
+}
+
+#[derive(Clone)]
+pub struct ModuleRuntime {
+    sessions: Arc<Mutex<HashMap<String, Sender<Value>>>>,
+    output: Sender<ModuleOutput>,
+}
+
+impl ModuleRuntime {
+    pub fn new(output: Sender<ModuleOutput>) -> Self {
+        Self {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            output,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn output_sender(&self) -> Sender<ModuleOutput> {
+        self.output.clone()
+    }
+
+    pub fn emit(&self, settings: &Settings, event: &str, song: Option<&Song>) {
+        for module in settings
+            .modules
+            .iter()
+            .filter(|module| module.enabled && module.rpc && module.session)
+        {
+            if !module_accepts_event(module, event) {
+                continue;
+            }
+            let _ = self.send_session(module, rpc_request(event, &[], song));
+        }
+        emit_with_output(settings, event, song, Some(&self.output));
+    }
+
+    pub fn dispatch_command(
+        &self,
+        settings: &Settings,
+        command_name: &str,
+        args: &[String],
+        song: Option<&Song>,
+    ) -> Option<Result<String, String>> {
+        for module in settings.modules.iter().filter(|module| module.enabled) {
+            let Some(alias) = module
+                .commands
+                .iter()
+                .find(|item| item.name.eq_ignore_ascii_case(command_name))
+            else {
+                continue;
+            };
+            if module.rpc && module.session {
+                let mut request_args = alias.args.clone();
+                request_args.extend(args.iter().cloned());
+                let event = format!("command:{command_name}");
+                return Some(
+                    self.send_session(module, rpc_request(&event, &request_args, song))
+                        .map(|_| format!("module {}: {}", module.name, command_name)),
+                );
+            }
+            break;
+        }
+        dispatch_command_with_output(settings, command_name, args, song, Some(&self.output))
+    }
+
+    pub fn send_input(&self, settings: &Settings, module_name: &str, key: &str) -> bool {
+        let Some(module) = settings.modules.iter().find(|module| {
+            module.enabled
+                && module.rpc
+                && module.session
+                && module.name.eq_ignore_ascii_case(module_name)
+        }) else {
+            return false;
+        };
+        self.send_session(
+            module,
+            json!({
+                "api_version": 1,
+                "type": "input",
+                "event": "key",
+                "key": key
+            }),
+        )
+        .is_ok()
+    }
+
+    pub fn reset(&self) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.clear();
+        }
+    }
+
+    fn send_session(
+        &self,
+        module: &crate::config::ModuleConfig,
+        request: Value,
+    ) -> Result<(), String> {
+        let name = module.name.clone();
+        let sender = self
+            .sessions
+            .lock()
+            .map_err(|_| "module session lock poisoned".to_string())?
+            .get(&name)
+            .cloned();
+        if let Some(sender) = sender {
+            if sender.send(request.clone()).is_ok() {
+                return Ok(());
+            }
+            self.sessions
+                .lock()
+                .map_err(|_| "module session lock poisoned".to_string())?
+                .remove(&name);
+        }
+        let sender = spawn_session(module, self.output.clone())
+            .map_err(|error| format!("cannot start module {name}: {error}"))?;
+        sender
+            .send(request)
+            .map_err(|_| format!("module session {name} closed"))?;
+        self.sessions
+            .lock()
+            .map_err(|_| "module session lock poisoned".to_string())?
+            .insert(name, sender);
+        Ok(())
     }
 }
 
@@ -82,7 +298,10 @@ pub fn emit_with_output(
             continue;
         }
         if module.rpc {
-            let _ = spawn_rpc(module, module.args.clone(), event, song, output);
+            if module.session {
+                continue;
+            }
+            let _ = spawn_rpc(module, module.args.clone(), Vec::new(), event, song, output);
             continue;
         }
         let mut process = Command::new(command);
@@ -141,10 +360,20 @@ pub fn dispatch_command_with_output(
         let mut command_args = alias.args.clone();
         command_args.extend(args.iter().cloned());
         if module.rpc {
+            if module.session {
+                continue;
+            }
             return Some(
-                spawn_rpc(module, command_args, &event, song, output)
-                    .map(|_| format!("module {}: {}", module.name, command_name))
-                    .map_err(|error| format!("cannot start module {}: {error}", module.name)),
+                spawn_rpc(
+                    module,
+                    module.args.clone(),
+                    command_args,
+                    &event,
+                    song,
+                    output,
+                )
+                .map(|_| format!("module {}: {}", module.name, command_name))
+                .map_err(|error| format!("cannot start module {}: {error}", module.name)),
             );
         }
         process.args(
@@ -174,9 +403,97 @@ pub fn dispatch_command_with_output(
     None
 }
 
+fn module_accepts_event(module: &crate::config::ModuleConfig, event: &str) -> bool {
+    module.events.is_empty()
+        || module
+            .events
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(event))
+}
+
+fn spawn_session(
+    module: &crate::config::ModuleConfig,
+    output: Sender<ModuleOutput>,
+) -> std::io::Result<Sender<Value>> {
+    let command = module.command.as_deref().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "module command is missing",
+        )
+    })?;
+    let mut process = Command::new(command);
+    if let Some(cwd) = module.cwd.as_deref() {
+        process.current_dir(cwd);
+    }
+    process.args(&module.args);
+    process.env("GROOV_API_VERSION", "1");
+    process.env("GROOV_EVENT", "session");
+    process.env(
+        "GROOV_EVENT_JSON",
+        "{\"type\":\"session\",\"api_version\":1}",
+    );
+    for (key, value) in &module.env {
+        process.env(key, value);
+    }
+    process
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = process.spawn()?;
+    let stdin = child.stdin.take().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "module stdin unavailable")
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "module stdout unavailable")
+    })?;
+    let (request_tx, request_rx) = mpsc::channel::<Value>();
+    let module_name = module.name.clone();
+    let output_for_reader = output.clone();
+    thread::spawn(move || {
+        let mut stdin = stdin;
+        for request in request_rx {
+            if writeln!(stdin, "{}", request)
+                .and_then(|_| stdin.flush())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if value.get("type").and_then(Value::as_str) == Some("batch") {
+                if let Some(messages) = value.get("messages").and_then(Value::as_array) {
+                    for (index, message) in messages.iter().enumerate() {
+                        let mut message = message.clone();
+                        if index + 1 == messages.len()
+                            && value.get("flush").and_then(Value::as_bool) == Some(true)
+                        {
+                            if let Some(object) = message.as_object_mut() {
+                                object.insert("flush".into(), Value::Bool(true));
+                            }
+                        }
+                        if let Some(parsed) = ModuleOutput::parse(&module_name, message) {
+                            let _ = output_for_reader.send(parsed);
+                        }
+                    }
+                }
+            } else if let Some(parsed) = ModuleOutput::parse(&module_name, value) {
+                let _ = output_for_reader.send(parsed);
+            }
+        }
+        let _ = child.wait();
+    });
+    Ok(request_tx)
+}
+
 fn spawn_rpc(
     module: &crate::config::ModuleConfig,
-    args: Vec<String>,
+    process_args: Vec<String>,
+    request_args: Vec<String>,
     event: &str,
     song: Option<&Song>,
     output: Option<&Sender<ModuleOutput>>,
@@ -192,7 +509,8 @@ fn spawn_rpc(
         process.current_dir(cwd);
     }
     process.args(
-        args.iter()
+        process_args
+            .iter()
             .map(|argument| interpolate(argument, event, song)),
     );
     process.env("GROOV_API_VERSION", "1");
@@ -210,7 +528,7 @@ fn spawn_rpc(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let mut child = process.spawn()?;
-    let request = rpc_request(event, &args, song);
+    let request = rpc_request(event, &request_args, song);
     let module_name = module.name.clone();
     let output = output.cloned();
     thread::spawn(move || {
@@ -222,11 +540,28 @@ fn spawn_rpc(
                 let Ok(value) = serde_json::from_str::<Value>(&line) else {
                     continue;
                 };
-                let Some(message) = ModuleOutput::parse(&module_name, value) else {
-                    continue;
-                };
-                if let Some(output) = &output {
-                    let _ = output.send(message);
+                if value.get("type").and_then(Value::as_str) == Some("batch") {
+                    if let Some(messages) = value.get("messages").and_then(Value::as_array) {
+                        for (index, message) in messages.iter().enumerate() {
+                            let mut message = message.clone();
+                            if index + 1 == messages.len()
+                                && value.get("flush").and_then(Value::as_bool) == Some(true)
+                            {
+                                if let Some(object) = message.as_object_mut() {
+                                    object.insert("flush".into(), Value::Bool(true));
+                                }
+                            }
+                            if let Some(parsed) = ModuleOutput::parse(&module_name, message) {
+                                if let Some(output) = &output {
+                                    let _ = output.send(parsed);
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(message) = ModuleOutput::parse(&module_name, value) {
+                    if let Some(output) = &output {
+                        let _ = output.send(message);
+                    }
                 }
             }
         }
@@ -300,7 +635,7 @@ fn interpolate(value: &str, event: &str, song: Option<&Song>) -> String {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{spawn_rpc, ModuleOutput};
+    use super::{spawn_rpc, spawn_session, ModuleOutput, ModuleWidgetNode};
     use crate::config::ModuleConfig;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -316,6 +651,7 @@ mod tests {
                 "-c".into(),
                 "read request; printf '{\"type\":\"status\",\"text\":\"ok\"}\\n'".into(),
             ],
+            Vec::new(),
             "command:test",
             None,
             Some(&tx),
@@ -325,5 +661,42 @@ mod tests {
         assert_eq!(output.module, "rpc-test");
         assert_eq!(output.kind, "status");
         assert_eq!(output.text, "ok");
+    }
+
+    #[test]
+    fn rpc_session_streams_multiple_requests() {
+        let module: ModuleConfig = serde_json::from_str(
+            r#"{"name":"rpc-session","rpc":true,"session":true,"command":"sh","args":["-c","while read line; do printf '{\"type\":\"status\",\"text\":\"ok\"}\\n'; done"]}"#,
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::channel::<ModuleOutput>();
+        let session = spawn_session(&module, tx).unwrap();
+        session.send(serde_json::json!({"event":"one"})).unwrap();
+        session.send(serde_json::json!({"event":"two"})).unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap().text, "ok");
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap().text, "ok");
+    }
+
+    #[test]
+    fn widget_tree_parses_nested_layout_and_children() {
+        let output = ModuleOutput::parse(
+            "tree",
+            serde_json::json!({
+                "type":"view",
+                "root": {
+                    "kind":"row",
+                    "children":[
+                        {"kind":"paragraph","text":"left","flex":2},
+                        {"kind":"gauge","value":3,"max":4,"flex":1}
+                    ]
+                }
+            }),
+        )
+        .unwrap();
+        let widget = output.widget.unwrap();
+        assert_eq!(widget.kind, "row");
+        assert_eq!(widget.children.len(), 2);
+        assert_eq!(widget.children[0].flex, 2);
+        let _typed: ModuleWidgetNode = widget;
     }
 }

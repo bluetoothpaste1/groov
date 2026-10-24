@@ -71,6 +71,9 @@ pub struct ModuleConfig {
     /// Use the JSONL request/response protocol instead of fire-and-forget env hooks.
     #[serde(default)]
     pub rpc: bool,
+    /// Keep an RPC process alive and stream requests over its stdin.
+    #[serde(default)]
+    pub session: bool,
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
@@ -480,6 +483,7 @@ mod tests {
         ))
         .unwrap();
         assert!(module.rpc);
+        assert!(module.session);
         assert_eq!(module.commands[0].name, "dashboard");
         assert_eq!(module.keys.get("D").map(String::as_str), Some("dashboard"));
     }

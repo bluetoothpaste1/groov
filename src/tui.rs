@@ -112,17 +112,6 @@ struct ImageResult {
     protocol: Option<Box<dyn StatefulProtocol>>,
 }
 
-#[derive(Debug, Clone)]
-struct ModuleWidget {
-    module: String,
-    kind: String,
-    title: String,
-    text: String,
-    lines: Vec<String>,
-    value: f64,
-    max: f64,
-}
-
 struct App {
     paths: AppPaths,
     settings: Settings,
@@ -156,15 +145,16 @@ struct App {
     image_generation: u64,
     image_requests: Sender<ImageRequest>,
     image_results: Receiver<ImageResult>,
-    module_output_tx: Sender<modules::ModuleOutput>,
     module_outputs: Receiver<modules::ModuleOutput>,
-    module_widget: Option<ModuleWidget>,
+    module_runtime: modules::ModuleRuntime,
+    module_widget: Option<modules::ModuleWidgetNode>,
 }
 
 impl App {
     fn new(paths: AppPaths, settings: Settings, songs: Vec<Song>) -> Self {
         let (image_requests, image_results) = spawn_image_worker();
         let (module_output_tx, module_outputs) = mpsc::channel();
+        let module_runtime = modules::ModuleRuntime::new(module_output_tx.clone());
         let repeat = settings.repeat;
         let mut app = Self {
             paths,
@@ -199,8 +189,8 @@ impl App {
             image_generation: 0,
             image_requests,
             image_results,
-            module_output_tx,
             module_outputs,
+            module_runtime,
             module_widget: None,
         };
         app.refresh_visible();
@@ -359,9 +349,18 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
-        if self.module_info.is_some() || self.module_widget.is_some() {
-            self.module_info = None;
+        if let Some(widget) = self.module_widget.as_ref() {
+            if self
+                .module_runtime
+                .send_input(&self.settings, &widget.module, &key_name(&key))
+            {
+                return false;
+            }
             self.module_widget = None;
+            return false;
+        }
+        if self.module_info.is_some() {
+            self.module_info = None;
             return false;
         }
         if self.show_help {
@@ -662,12 +661,7 @@ impl App {
                 self.playback_started = Some(Instant::now());
                 self.playback_offset_seconds = offset_seconds;
                 self.status = format!("playing {} — {}", song.info.artist, song.info.title);
-                modules::emit_with_output(
-                    &self.settings,
-                    "play",
-                    Some(song),
-                    Some(&self.module_output_tx),
-                );
+                self.module_runtime.emit(&self.settings, "play", Some(song));
             }
             Err(error) => {
                 self.playback_started = None;
@@ -716,12 +710,7 @@ impl App {
 
     fn stop_playback(&mut self) {
         let current = self.playing.and_then(|index| self.songs.get(index));
-        modules::emit_with_output(
-            &self.settings,
-            "stop",
-            current,
-            Some(&self.module_output_tx),
-        );
+        self.module_runtime.emit(&self.settings, "stop", current);
         player::stop(&mut self.player);
         self.playing = None;
         self.playback_started = None;
@@ -822,12 +811,11 @@ impl App {
             self.handle_modules_command(args);
             return;
         }
-        if let Some(result) = modules::dispatch_command_with_output(
+        if let Some(result) = self.module_runtime.dispatch_command(
             &self.settings,
             command,
             args,
             self.selected_song(),
-            Some(&self.module_output_tx),
         ) {
             self.status = result.unwrap_or_else(|error| error);
             return;
@@ -924,17 +912,13 @@ impl App {
                     self.paused_at = None;
                     self.refresh_visible();
                     self.status = "library rescanned".into();
-                    modules::emit_with_output(
-                        &self.settings,
-                        "rescan",
-                        None,
-                        Some(&self.module_output_tx),
-                    );
+                    self.module_runtime.emit(&self.settings, "rescan", None);
                 }
                 Err(error) => self.status = error.to_string(),
             },
             "reload" => match config::load(&self.paths) {
                 Ok(settings) => {
+                    self.module_runtime.reset();
                     self.repeat = settings.repeat;
                     self.settings = settings;
                     self.configure_image_picker();
@@ -1155,12 +1139,8 @@ impl App {
                 self.songs[index].refresh_optional_files();
                 self.refresh_visible();
                 self.status = format!("updated song {id}");
-                modules::emit_with_output(
-                    &self.settings,
-                    "metadata",
-                    self.songs.get(index),
-                    Some(&self.module_output_tx),
-                );
+                self.module_runtime
+                    .emit(&self.settings, "metadata", self.songs.get(index));
             }
             Err(error) => self.status = error.to_string(),
         }
@@ -1259,12 +1239,11 @@ impl App {
         let Some(command) = tokens.first() else {
             return;
         };
-        let result = modules::dispatch_command_with_output(
+        let result = self.module_runtime.dispatch_command(
             &self.settings,
             command,
             tokens.get(1..).unwrap_or(&[]),
             self.selected_song(),
-            Some(&self.module_output_tx),
         );
         if result.is_none() {
             self.input = action.to_string();
@@ -1303,12 +1282,8 @@ impl App {
                 self.songs[index].refresh_optional_files();
                 self.refresh_visible();
                 self.status = format!("updated song {id}");
-                modules::emit_with_output(
-                    &self.settings,
-                    event,
-                    self.songs.get(index),
-                    Some(&self.module_output_tx),
-                );
+                self.module_runtime
+                    .emit(&self.settings, event, self.songs.get(index));
             }
             Err(error) => self.status = error.to_string(),
         }
@@ -1373,7 +1348,7 @@ impl App {
     fn receive_module_outputs(&mut self) -> bool {
         let mut changed = false;
         while let Ok(output) = self.module_outputs.try_recv() {
-            changed = true;
+            changed |= output.flush;
             match output.kind.as_str() {
                 "status" => {
                     self.status = if output.text.is_empty() {
@@ -1397,15 +1372,20 @@ impl App {
                     };
                     self.module_info = Some(format!("module: {}\n\n{}", output.module, body));
                 }
-                "paragraph" | "list" | "gauge" => {
-                    self.module_widget = Some(ModuleWidget {
-                        module: output.module,
-                        kind: output.kind,
-                        title: output.title,
-                        text: output.text,
-                        lines: output.lines,
-                        value: output.value,
-                        max: output.max,
+                "paragraph" | "list" | "gauge" | "view" => {
+                    self.module_widget = output.widget.or_else(|| {
+                        Some(modules::ModuleWidgetNode {
+                            module: output.module,
+                            kind: output.kind,
+                            title: output.title,
+                            text: output.text,
+                            lines: output.lines,
+                            value: output.value,
+                            max: output.max,
+                            direction: "column".into(),
+                            flex: 1,
+                            children: Vec::new(),
+                        })
                     });
                 }
                 "redraw" => {}
@@ -1705,9 +1685,73 @@ impl App {
         );
     }
 
-    fn draw_module_widget(&self, frame: &mut Frame<'_>, palette: Palette, widget: &ModuleWidget) {
+    fn draw_module_widget(
+        &self,
+        frame: &mut Frame<'_>,
+        palette: Palette,
+        widget: &modules::ModuleWidgetNode,
+    ) {
         let area = centered_rect(76, 48, frame.area());
         frame.render_widget(Clear, area);
+        self.render_module_node(frame, palette, area, widget);
+    }
+
+    fn render_module_node(
+        &self,
+        frame: &mut Frame<'_>,
+        palette: Palette,
+        area: Rect,
+        widget: &modules::ModuleWidgetNode,
+    ) {
+        if !widget.children.is_empty() || matches!(widget.kind.as_str(), "row" | "column" | "stack")
+        {
+            let inner = if widget.title.is_empty() {
+                area
+            } else {
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(palette.border))
+                    .title(widget.title.clone());
+                let inner = block.inner(area);
+                frame.render_widget(block, area);
+                inner
+            };
+            if widget.kind == "stack" {
+                for child in &widget.children {
+                    self.render_module_node(frame, palette, inner, child);
+                }
+                return;
+            }
+            let total: u32 = widget
+                .children
+                .iter()
+                .map(|child| u32::from(child.flex))
+                .sum();
+            let constraints = widget
+                .children
+                .iter()
+                .map(|child| {
+                    Constraint::Percentage(
+                        ((u32::from(child.flex) * 100) / total.max(1)).clamp(1, 100) as u16,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let direction = if widget.kind == "row" || widget.direction == "horizontal" {
+                Direction::Horizontal
+            } else {
+                Direction::Vertical
+            };
+            for (child, child_area) in widget.children.iter().zip(
+                Layout::default()
+                    .direction(direction)
+                    .constraints(constraints)
+                    .split(inner)
+                    .iter(),
+            ) {
+                self.render_module_node(frame, palette, *child_area, child);
+            }
+            return;
+        }
         let title = if widget.title.is_empty() {
             format!(" Module: {} ", widget.module)
         } else {
@@ -1733,33 +1777,28 @@ impl App {
                     area,
                 );
             }
-            "list" => {
-                let text = widget.lines.join("\n");
-                frame.render_widget(
-                    Paragraph::new(text)
-                        .block(block)
-                        .style(
-                            Style::default()
-                                .fg(palette.foreground)
-                                .bg(palette.background),
-                        )
-                        .wrap(ratatui::widgets::Wrap { trim: false }),
-                    area,
-                );
-            }
-            _ => {
-                frame.render_widget(
-                    Paragraph::new(widget.text.clone())
-                        .block(block)
-                        .style(
-                            Style::default()
-                                .fg(palette.foreground)
-                                .bg(palette.background),
-                        )
-                        .wrap(ratatui::widgets::Wrap { trim: false }),
-                    area,
-                );
-            }
+            "list" => frame.render_widget(
+                Paragraph::new(widget.lines.join("\n"))
+                    .block(block)
+                    .style(
+                        Style::default()
+                            .fg(palette.foreground)
+                            .bg(palette.background),
+                    )
+                    .wrap(ratatui::widgets::Wrap { trim: false }),
+                area,
+            ),
+            _ => frame.render_widget(
+                Paragraph::new(widget.text.clone())
+                    .block(block)
+                    .style(
+                        Style::default()
+                            .fg(palette.foreground)
+                            .bg(palette.background),
+                    )
+                    .wrap(ratatui::widgets::Wrap { trim: false }),
+                area,
+            ),
         }
     }
 }
@@ -2276,7 +2315,8 @@ mod tests {
         };
         fs::create_dir_all(&paths.config_dir).unwrap();
         let mut app = App::new(paths, Settings::default(), Vec::new());
-        app.module_output_tx
+        app.module_runtime
+            .output_sender()
             .send(crate::modules::ModuleOutput {
                 module: "rpc".into(),
                 kind: "gauge".into(),
@@ -2286,6 +2326,8 @@ mod tests {
                 value: 5.0,
                 max: 10.0,
                 data: serde_json::json!({"type":"gauge"}),
+                flush: true,
+                widget: None,
             })
             .unwrap();
         assert!(app.receive_module_outputs());
