@@ -1,41 +1,57 @@
 CC ?= clang
 CURL_CONFIG ?= curl-config
+CARGO ?= cargo
 
-CPPFLAGS += -Iinclude
-CFLAGS += -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes -MMD -MP
-LDLIBS += $(shell $(CURL_CONFIG) --libs)
+RUST_APP := target/debug/groov
+LEGACY_APP := build/groov-legacy
+TEST_APP := build/test_vk
+LEGACY_OBJECTS := build/legacy-main.o build/vk.o
+TEST_OBJECTS := build/vk.o build/test_vk.o
 
-BUILD_DIR := build
-APP := $(BUILD_DIR)/groov
-TEST_APP := $(BUILD_DIR)/test_vk
-SOURCES := src/main.c src/vk.c
-OBJECTS := $(SOURCES:%.c=$(BUILD_DIR)/%.o)
-TEST_OBJECTS := $(BUILD_DIR)/src/vk.o $(BUILD_DIR)/tests/test_vk.o
-DEPENDS := $(OBJECTS:.o=.d) $(TEST_OBJECTS:.o=.d)
+.PHONY: all build clean run test legacy test-vk docs-check
 
-.PHONY: all clean run test
+all: build
 
-all: $(APP)
+build: $(RUST_APP)
 
-$(APP): $(OBJECTS)
+$(RUST_APP): Cargo.toml Cargo.lock $(wildcard src/*.rs)
+	$(CARGO) build
+
+legacy: $(LEGACY_APP)
+
+$(LEGACY_APP): $(LEGACY_OBJECTS)
 	@mkdir -p $(@D)
-	$(CC) $(OBJECTS) $(LDLIBS) -o $@
+	$(CC) $(LEGACY_OBJECTS) $(shell $(CURL_CONFIG) --libs) -o $@
 
 $(TEST_APP): $(TEST_OBJECTS)
 	@mkdir -p $(@D)
-	$(CC) $(TEST_OBJECTS) $(LDLIBS) -o $@
+	$(CC) $(TEST_OBJECTS) $(shell $(CURL_CONFIG) --libs) -o $@
 
-$(BUILD_DIR)/%.o: %.c
+build/legacy-main.o: src/main.c
 	@mkdir -p $(@D)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+	$(CC) -Iinclude -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes -MMD -MP -c $< -o $@
 
-test: $(TEST_APP)
+build/vk.o: src/vk.c
+	@mkdir -p $(@D)
+	$(CC) -Iinclude -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes -MMD -MP -c $< -o $@
+
+build/test_vk.o: tests/test_vk.c
+	@mkdir -p $(@D)
+	$(CC) -Iinclude -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Wstrict-prototypes -MMD -MP -c $< -o $@
+
+test: test-vk
+	$(CARGO) test
+
+test-vk: $(TEST_APP)
 	$(TEST_APP)
 
-run: $(APP)
-	$(APP) --help
+docs-check:
+	python3 scripts/check_docs.py
+
+run: build
+	$(RUST_APP) help
 
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf build target
 
--include $(DEPENDS)
+-include build/*.d

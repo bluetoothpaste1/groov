@@ -1,0 +1,2092 @@
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Child;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use crossterm::cursor::{Hide, Show};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph};
+use ratatui::{Frame, Terminal};
+use ratatui_image::picker::{Picker, ProtocolType};
+use ratatui_image::protocol::StatefulProtocol;
+use ratatui_image::{Resize, StatefulImage};
+
+use crate::config::{self, Settings};
+use crate::library::{scan, write_info_atomic, Song, SongInfo};
+use crate::modules;
+use crate::paths::AppPaths;
+use crate::player;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Normal,
+    Command,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Palette {
+    foreground: Color,
+    background: Color,
+    accent: Color,
+    muted: Color,
+    highlight: Color,
+    playing: Color,
+    border: Color,
+}
+
+impl Palette {
+    fn from_settings(settings: &Settings) -> Self {
+        let built_in = match settings.theme.to_ascii_lowercase().as_str() {
+            "ocean" => config::ThemeConfig {
+                foreground: "#d7eaff".into(),
+                background: "#071827".into(),
+                accent: "#5fd7ff".into(),
+                muted: "#6f91a8".into(),
+                highlight: "#153b55".into(),
+                playing: "#7fffd4".into(),
+                border: "#2d6385".into(),
+            },
+            "gruvbox" => config::ThemeConfig {
+                foreground: "#ebdbb2".into(),
+                background: "#282828".into(),
+                accent: "#fabd2f".into(),
+                muted: "#928374".into(),
+                highlight: "#504945".into(),
+                playing: "#b8bb26".into(),
+                border: "#a89984".into(),
+            },
+            "nord" => config::ThemeConfig {
+                foreground: "#d8dee9".into(),
+                background: "#2e3440".into(),
+                accent: "#88c0d0".into(),
+                muted: "#81a1c1".into(),
+                highlight: "#434c5e".into(),
+                playing: "#a3be8c".into(),
+                border: "#5e81ac".into(),
+            },
+            "dracula" => config::ThemeConfig {
+                foreground: "#f8f8f2".into(),
+                background: "#282a36".into(),
+                accent: "#bd93f9".into(),
+                muted: "#6272a4".into(),
+                highlight: "#44475a".into(),
+                playing: "#50fa7b".into(),
+                border: "#8be9fd".into(),
+            },
+            _ => config::ThemeConfig::default(),
+        };
+        let theme = settings
+            .themes
+            .get(&settings.theme.to_ascii_lowercase())
+            .unwrap_or(&built_in);
+        Self {
+            foreground: parse_color(&theme.foreground, Color::White),
+            background: parse_color(&theme.background, Color::Reset),
+            accent: parse_color(&theme.accent, Color::Cyan),
+            muted: parse_color(&theme.muted, Color::DarkGray),
+            highlight: parse_color(&theme.highlight, Color::DarkGray),
+            playing: parse_color(&theme.playing, Color::Green),
+            border: parse_color(&theme.border, Color::Gray),
+        }
+    }
+}
+
+struct ImageRequest {
+    generation: u64,
+    path: PathBuf,
+    picker: Picker,
+    cells: (u16, u16),
+}
+
+struct ImageResult {
+    generation: u64,
+    path: PathBuf,
+    protocol: Option<Box<dyn StatefulProtocol>>,
+}
+
+struct App {
+    paths: AppPaths,
+    settings: Settings,
+    songs: Vec<Song>,
+    visible: Vec<usize>,
+    selected: usize,
+    mode: Mode,
+    input: String,
+    input_prefix: char,
+    show_help: bool,
+    module_info: Option<String>,
+    query: String,
+    tags: Vec<String>,
+    status: String,
+    pending_g: bool,
+    player: Option<Child>,
+    playing: Option<usize>,
+    playback_started: Option<Instant>,
+    playback_offset_seconds: u64,
+    paused: bool,
+    paused_at: Option<Instant>,
+    repeat: bool,
+    queue: Vec<usize>,
+    queue_position: Option<usize>,
+    should_quit: bool,
+    image_picker: Picker,
+    image_protocol: Option<Box<dyn StatefulProtocol>>,
+    image_path: Option<PathBuf>,
+    image_cells: Option<(u16, u16)>,
+    image_pending: bool,
+    image_generation: u64,
+    image_requests: Sender<ImageRequest>,
+    image_results: Receiver<ImageResult>,
+}
+
+impl App {
+    fn new(paths: AppPaths, settings: Settings, songs: Vec<Song>) -> Self {
+        let (image_requests, image_results) = spawn_image_worker();
+        let repeat = settings.repeat;
+        let mut app = Self {
+            paths,
+            settings,
+            songs,
+            visible: Vec::new(),
+            selected: 0,
+            mode: Mode::Normal,
+            input: String::new(),
+            input_prefix: ':',
+            show_help: false,
+            module_info: None,
+            query: String::new(),
+            tags: Vec::new(),
+            status: "ready".into(),
+            pending_g: false,
+            player: None,
+            playing: None,
+            playback_started: None,
+            playback_offset_seconds: 0,
+            paused: false,
+            paused_at: None,
+            repeat,
+            queue: Vec::new(),
+            queue_position: None,
+            should_quit: false,
+            image_picker: Picker::new((8, 16)),
+            image_protocol: None,
+            image_path: None,
+            image_cells: None,
+            image_pending: false,
+            image_generation: 0,
+            image_requests,
+            image_results,
+        };
+        app.refresh_visible();
+        app
+    }
+
+    fn configure_image_picker(&mut self) {
+        // Halfblocks are the only protocol guaranteed by an ANSI terminal.
+        // Kitty, Sixel and iTerm2 remain explicit opt-ins, so opening groov in
+        // SSH, tmux, macOS Terminal, Linux console, or an IDE never emits an
+        // unsupported graphics escape sequence.
+        self.image_picker = Picker::new((8, 16));
+        match self.settings.image_mode.to_ascii_lowercase().as_str() {
+            "ansi" | "ascii" => self.image_picker.protocol_type = ProtocolType::Halfblocks,
+            "sixel" => self.image_picker.protocol_type = ProtocolType::Sixel,
+            "kitty" => self.image_picker.protocol_type = ProtocolType::Kitty,
+            "iterm" | "iterm2" => self.image_picker.protocol_type = ProtocolType::Iterm2,
+            "none" => {}
+            _ => self.image_picker.protocol_type = ProtocolType::Halfblocks,
+        }
+    }
+
+    fn refresh_visible(&mut self) {
+        let query = self.query.to_ascii_lowercase();
+        self.visible = self
+            .songs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, song)| {
+                let text_match = query.is_empty()
+                    || [
+                        song.info.title.as_str(),
+                        song.info.artist.as_str(),
+                        song.info.album.as_str(),
+                        song.info.id.as_str(),
+                    ]
+                    .iter()
+                    .any(|field| field.to_ascii_lowercase().contains(&query));
+                if text_match && song.info.matches_tags(&self.tags) {
+                    Some(index)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if self.visible.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= self.visible.len() {
+            self.selected = self.visible.len() - 1;
+        }
+    }
+
+    fn selected_song(&self) -> Option<&Song> {
+        self.visible
+            .get(self.selected)
+            .and_then(|index| self.songs.get(*index))
+    }
+
+    fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut stdout = io::stdout();
+        terminal::enable_raw_mode()?;
+        if let Err(error) = execute!(stdout, EnterAlternateScreen, Hide) {
+            let _ = terminal::disable_raw_mode();
+            return Err(error.into());
+        }
+        self.configure_image_picker();
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+        let result = self.event_loop(&mut terminal);
+        player::stop(&mut self.player);
+        let cursor_error = terminal.show_cursor().err();
+        let screen_error = execute!(terminal.backend_mut(), Show, LeaveAlternateScreen).err();
+        let raw_error = terminal::disable_raw_mode().err();
+        if let Some(error) = cursor_error.or(screen_error).or(raw_error) {
+            return Err(error.into());
+        }
+        result
+    }
+
+    fn event_loop(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut dirty = true;
+        loop {
+            if self.receive_image_results() {
+                dirty = true;
+            }
+            if dirty {
+                terminal.draw(|frame| self.draw(frame))?;
+                dirty = false;
+            }
+            if event::poll(Duration::from_millis(self.settings.refresh_ms.max(50)))? {
+                match event::read()? {
+                    Event::Key(key) => {
+                        if self.handle_key(key) || self.should_quit {
+                            break;
+                        }
+                        dirty = true;
+                    }
+                    Event::Resize(_, _) => dirty = true,
+                    _ => {}
+                }
+            }
+            let finished = if let Some(process) = self.player.as_mut() {
+                process.try_wait()?.is_some()
+            } else {
+                false
+            };
+            if finished {
+                let finished_song = self.playing;
+                self.player = None;
+                self.playing = None;
+                self.playback_started = None;
+                self.playback_offset_seconds = 0;
+                self.paused = false;
+                self.paused_at = None;
+                self.image_protocol = None;
+                self.image_path = None;
+                self.image_cells = None;
+                self.image_pending = false;
+                self.image_generation = self.image_generation.wrapping_add(1);
+                if self.repeat {
+                    if let Some(index) = finished_song {
+                        self.start_song_at(index, 0);
+                    } else {
+                        self.play_next();
+                    }
+                } else {
+                    self.play_next();
+                }
+                dirty = true;
+            }
+            if self.receive_image_results() {
+                dirty = true;
+            }
+            if self.player.is_some() && self.playback_started.is_some() && !self.paused {
+                dirty = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> bool {
+        if self.module_info.is_some() {
+            self.module_info = None;
+            return false;
+        }
+        if self.show_help {
+            self.show_help = false;
+            return false;
+        }
+        match self.mode {
+            Mode::Normal => self.handle_normal(key),
+            Mode::Command => self.handle_input(key),
+        }
+    }
+
+    fn handle_normal(&mut self, key: KeyEvent) -> bool {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            return true;
+        }
+        if configured_key(&key, &self.settings.keymap.quit) {
+            return true;
+        }
+        if key.code == KeyCode::Char(' ')
+            || (!self.settings.keymap.play.eq_ignore_ascii_case("enter")
+                && configured_key(&key, &self.settings.keymap.play))
+        {
+            self.toggle_playback();
+            return false;
+        }
+        if configured_key(&key, &self.settings.keymap.stop) {
+            self.stop_playback();
+            return false;
+        }
+        if configured_key(&key, &self.settings.keymap.search) {
+            self.mode = Mode::Command;
+            self.input = "search ".into();
+            self.input_prefix = '/';
+            return false;
+        }
+        let key_name = key_name(&key);
+        if let Some(action) = modules::key_action(&self.settings, &key_name) {
+            self.execute_module_action(&action);
+            return false;
+        }
+        match key.code {
+            KeyCode::Esc => true,
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.move_selection(1);
+                false
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.move_selection(-1);
+                false
+            }
+            KeyCode::Char('g') => {
+                if self.pending_g {
+                    self.selected = 0;
+                    self.pending_g = false;
+                } else {
+                    self.pending_g = true;
+                }
+                false
+            }
+            KeyCode::Char('G') => {
+                if !self.visible.is_empty() {
+                    self.selected = self.visible.len() - 1;
+                }
+                false
+            }
+            KeyCode::Char(']') | KeyCode::Char('n') => {
+                self.play_next();
+                false
+            }
+            KeyCode::Char('[') => {
+                self.play_previous();
+                false
+            }
+            KeyCode::Char('h') => {
+                self.seek(-(self.settings.skip_seconds as i64));
+                false
+            }
+            KeyCode::Char('l') => {
+                self.seek(self.settings.skip_seconds as i64);
+                false
+            }
+            KeyCode::Char('a') => {
+                self.enqueue_selected();
+                false
+            }
+            KeyCode::Char(':') => {
+                self.mode = Mode::Command;
+                self.input.clear();
+                self.input_prefix = ':';
+                false
+            }
+            KeyCode::Char('?') => {
+                self.show_help = !self.show_help;
+                false
+            }
+            _ => {
+                self.pending_g = false;
+                false
+            }
+        }
+    }
+
+    fn handle_input(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                self.input.clear();
+                self.input_prefix = ':';
+            }
+            KeyCode::Enter => {
+                self.execute_command();
+                self.input.clear();
+                self.mode = Mode::Normal;
+                self.input_prefix = ':';
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+            }
+            KeyCode::Tab => self.complete_command(),
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.input.push(character)
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn complete_command(&mut self) {
+        let input = self.input.clone();
+        let trimmed = input.trim_start();
+        if !trimmed.contains(char::is_whitespace) {
+            let prefix = trimmed.to_ascii_lowercase();
+            let matches = command_names()
+                .iter()
+                .filter(|name| name.starts_with(&prefix))
+                .map(|name| (*name).to_string())
+                .collect::<Vec<_>>();
+            self.apply_word_completion(&input, trimmed, matches);
+            return;
+        }
+
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("modules") {
+            let after_modules = trimmed[7..].trim_start();
+            if !after_modules.contains(char::is_whitespace) {
+                let prefix = after_modules.to_ascii_lowercase();
+                let matches = ["info", "list", "off", "on"]
+                    .iter()
+                    .filter(|name| name.starts_with(&prefix))
+                    .map(|name| (*name).to_string())
+                    .collect::<Vec<_>>();
+                self.apply_word_completion(&input, after_modules, matches);
+                return;
+            }
+            let mut words = trimmed.split_whitespace();
+            let _ = words.next();
+            let action = words.next().unwrap_or("").to_ascii_lowercase();
+            let prefix = words.next().unwrap_or("");
+            if matches!(action.as_str(), "on" | "off" | "info") {
+                let names = self
+                    .settings
+                    .modules
+                    .iter()
+                    .map(|module| module.name.clone())
+                    .filter(|name| {
+                        name.to_ascii_lowercase()
+                            .starts_with(&prefix.to_ascii_lowercase())
+                    })
+                    .collect::<Vec<_>>();
+                self.apply_word_completion(&input, prefix, names);
+            }
+            return;
+        }
+        if lower.starts_with("set") {
+            let after_set = trimmed[3..].trim_start();
+            if !after_set.contains(char::is_whitespace) {
+                let prefix = after_set.to_ascii_lowercase();
+                let matches = set_field_names()
+                    .iter()
+                    .filter(|name| name.starts_with(&prefix))
+                    .map(|name| (*name).to_string())
+                    .collect::<Vec<_>>();
+                let base = format!("set {}", after_set);
+                self.apply_word_completion(&input, &base[4..], matches);
+                return;
+            }
+            let mut words = trimmed.splitn(3, char::is_whitespace);
+            let _ = words.next();
+            let field = words.next().unwrap_or("").to_ascii_lowercase();
+            if field == "image" || field == "lyrics" {
+                self.complete_path(&input, &field);
+            }
+        }
+    }
+
+    fn apply_word_completion(&mut self, input: &str, current: &str, matches: Vec<String>) {
+        if matches.is_empty() {
+            self.status = "no completion".into();
+            return;
+        }
+        let common = common_prefix(&matches);
+        let current_start = input.len() - current.len();
+        let completed = if matches.len() == 1 {
+            format!("{} ", matches[0])
+        } else {
+            common.clone()
+        };
+        self.input = format!("{}{}", &input[..current_start], completed);
+        if matches.len() > 1 {
+            self.status = matches.join("  ");
+        } else {
+            self.status.clear();
+        }
+    }
+
+    fn complete_path(&mut self, input: &str, field: &str) {
+        let marker = format!("set {field}");
+        let Some(marker_start) = input.to_ascii_lowercase().find(&marker) else {
+            return;
+        };
+        let value_start = marker_start + marker.len() + input[marker_start + marker.len()..].len()
+            - input[marker_start + marker.len()..].trim_start().len();
+        let typed = &input[value_start..];
+        let quoted = typed.starts_with('"') || typed.starts_with('\'');
+        let raw_typed = typed
+            .strip_prefix('"')
+            .or_else(|| typed.strip_prefix('\''))
+            .unwrap_or(typed);
+        let matches = path_matches(raw_typed);
+        if matches.is_empty() {
+            self.status = "no path completion".into();
+            return;
+        }
+        let common = common_prefix(
+            &matches
+                .iter()
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>(),
+        );
+        let selected = matches.len() == 1;
+        let mut rendered = if selected {
+            matches[0].0.clone()
+        } else {
+            common
+        };
+        if quoted || rendered.contains(' ') {
+            rendered = format!("\"{}\"", rendered.replace('"', "\\\""));
+        }
+        self.input = format!("{}{}", &input[..value_start], rendered);
+        if selected && !matches[0].1 {
+            self.input.push(' ');
+        }
+        if matches.len() > 1 {
+            self.status = matches
+                .iter()
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>()
+                .join("  ");
+        } else {
+            self.status.clear();
+        }
+    }
+
+    fn move_selection(&mut self, delta: i32) {
+        self.pending_g = false;
+        if self.visible.is_empty() {
+            return;
+        }
+        let current = self.selected as i32;
+        self.selected = (current + delta).clamp(0, self.visible.len() as i32 - 1) as usize;
+    }
+
+    fn play_selected(&mut self) {
+        let Some(index) = self.visible.get(self.selected).copied() else {
+            self.status = "library is empty".into();
+            return;
+        };
+        if self.queue.is_empty() {
+            self.queue = self.visible.clone();
+        }
+        if !self.queue.contains(&index) {
+            self.queue.push(index);
+        }
+        self.queue_position = self.queue.iter().position(|item| *item == index);
+        self.start_song_at(index, 0);
+    }
+
+    fn start_song_at(&mut self, index: usize, offset_seconds: u64) {
+        player::stop(&mut self.player);
+        self.paused = false;
+        self.paused_at = None;
+        let song = &self.songs[index];
+        match player::start(&self.settings, &song.audio, offset_seconds) {
+            Ok(child) => {
+                self.player = Some(child);
+                self.playing = Some(index);
+                self.playback_started = Some(Instant::now());
+                self.playback_offset_seconds = offset_seconds;
+                self.status = format!("playing {} — {}", song.info.artist, song.info.title);
+                modules::emit(&self.settings, "play", Some(song));
+            }
+            Err(error) => {
+                self.playback_started = None;
+                self.playback_offset_seconds = 0;
+                self.paused = false;
+                self.paused_at = None;
+                self.status = error;
+            }
+        }
+    }
+
+    fn toggle_playback(&mut self) {
+        let selected = self.visible.get(self.selected).copied();
+        if self.player.is_none() || (selected.is_some() && selected != self.playing) {
+            self.play_selected();
+            return;
+        }
+        let Some(player_process) = self.player.as_ref() else {
+            return;
+        };
+        if self.paused {
+            match player::resume(player_process) {
+                Ok(()) => {
+                    if let (Some(started), Some(paused_at)) =
+                        (self.playback_started, self.paused_at)
+                    {
+                        self.playback_started = Some(started + paused_at.elapsed());
+                    }
+                    self.paused = false;
+                    self.paused_at = None;
+                    self.status = "resumed".into();
+                }
+                Err(error) => self.status = error,
+            }
+        } else {
+            match player::pause(player_process) {
+                Ok(()) => {
+                    self.paused = true;
+                    self.paused_at = Some(Instant::now());
+                    self.status = "paused".into();
+                }
+                Err(error) => self.status = error,
+            }
+        }
+    }
+
+    fn stop_playback(&mut self) {
+        let current = self.playing.and_then(|index| self.songs.get(index));
+        modules::emit(&self.settings, "stop", current);
+        player::stop(&mut self.player);
+        self.playing = None;
+        self.playback_started = None;
+        self.playback_offset_seconds = 0;
+        self.paused = false;
+        self.paused_at = None;
+        self.status = "stopped".into();
+    }
+
+    fn seek(&mut self, delta_seconds: i64) {
+        let Some(index) = self.playing else {
+            self.status = "nothing is playing".into();
+            return;
+        };
+        let current = self.playback_elapsed();
+        let duration = self.songs[index].info.duration_seconds;
+        let target = if duration == 0 {
+            current.saturating_add_signed(delta_seconds)
+        } else {
+            current
+                .saturating_add_signed(delta_seconds)
+                .min(duration.saturating_sub(1))
+        };
+        self.start_song_at(index, target);
+        self.status = format!("seeked to {}", format_time(target));
+    }
+
+    fn playback_elapsed(&self) -> u64 {
+        self.playback_offset_seconds
+            + self
+                .playback_started
+                .map(|started| {
+                    self.paused_at
+                        .map(|paused_at| paused_at.duration_since(started).as_secs())
+                        .unwrap_or_else(|| started.elapsed().as_secs())
+                })
+                .unwrap_or(0)
+    }
+
+    fn timeline_song(&self) -> Option<&Song> {
+        self.playing
+            .and_then(|index| self.songs.get(index))
+            .or_else(|| self.selected_song())
+    }
+
+    fn play_next(&mut self) {
+        let Some(position) = self.queue_position else {
+            self.status = "queue is empty".into();
+            self.playing = None;
+            return;
+        };
+        let Some(next) = next_visible_queue_position(&self.queue, position, &self.visible) else {
+            self.playing = None;
+            self.status = "queue finished".into();
+            return;
+        };
+        self.queue_position = Some(next);
+        self.start_song_at(self.queue[next], 0);
+    }
+
+    fn play_previous(&mut self) {
+        let Some(position) = self.queue_position else {
+            self.status = "queue is empty".into();
+            return;
+        };
+        if position == 0 {
+            self.status = "already at queue start".into();
+            return;
+        }
+        let previous = position - 1;
+        self.queue_position = Some(previous);
+        self.start_song_at(self.queue[previous], 0);
+    }
+
+    fn enqueue_selected(&mut self) {
+        let Some(index) = self.visible.get(self.selected).copied() else {
+            self.status = "library is empty".into();
+            return;
+        };
+        if !self.queue.contains(&index) {
+            self.queue.push(index);
+        }
+        self.status = format!("queued {}", self.songs[index].info.title);
+    }
+
+    fn execute_command(&mut self) {
+        let input = self.input.trim().to_string();
+        let tokens = match parse_command_line(&input) {
+            Ok(tokens) => tokens,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        let command = tokens.first().map(String::as_str).unwrap_or("");
+        let args = tokens.get(1..).unwrap_or(&[]);
+        if command.eq_ignore_ascii_case("modules") {
+            self.handle_modules_command(args);
+            return;
+        }
+        if let Some(result) =
+            modules::dispatch_command(&self.settings, command, args, self.selected_song())
+        {
+            self.status = result.unwrap_or_else(|error| error);
+            return;
+        }
+        match command {
+            "q" | "quit" => self.should_quit = true,
+            "tag" => {
+                let tags = split_tag_args(args);
+                if tags.is_empty() {
+                    self.status = "usage: :tag name".into();
+                } else {
+                    self.update_selected_info("metadata", move |info| {
+                        for tag in &tags {
+                            info.add_tag(tag);
+                        }
+                    });
+                }
+            }
+            "untag" => {
+                let tags = split_tag_args(args);
+                if tags.is_empty() {
+                    self.status = "usage: :untag name".into();
+                } else {
+                    self.update_selected_info("metadata", move |info| {
+                        for tag in &tags {
+                            info.remove_tag(tag);
+                        }
+                    });
+                }
+            }
+            "tags" => {
+                self.tags = split_tag_args(args);
+                self.refresh_visible();
+                self.status = if self.tags.is_empty() {
+                    "tag filter cleared".into()
+                } else {
+                    format!("tag filter: {}", self.tags.join(", "))
+                };
+            }
+            "clear" => {
+                self.tags.clear();
+                self.query.clear();
+                self.refresh_visible();
+                self.status = "filters cleared".into();
+            }
+            "search" => {
+                self.query = args.join(" ");
+                self.refresh_visible();
+                self.status = format!("search: {}", self.query);
+            }
+            "themes" => {
+                let mut names = config::builtin_themes()
+                    .iter()
+                    .map(|name| (*name).to_string())
+                    .collect::<Vec<_>>();
+                names.extend(self.settings.themes.keys().cloned());
+                self.status = format!(
+                    "themes: {} (active: {})",
+                    names.join(", "),
+                    self.settings.theme
+                );
+            }
+            "play" => self.toggle_playback(),
+            "queue" => match args.first().map(String::as_str) {
+                Some("clear") => {
+                    self.queue.clear();
+                    self.queue_position = None;
+                    self.status = "queue cleared".into();
+                }
+                Some("visible") | None => {
+                    self.queue = self.visible.clone();
+                    self.queue_position = self
+                        .playing
+                        .and_then(|playing| self.queue.iter().position(|item| *item == playing));
+                    self.status = format!("queue: {} song(s)", self.queue.len());
+                }
+                Some(other) => self.status = format!("unknown queue option: {other}"),
+            },
+            "enqueue" => self.enqueue_selected(),
+            "next" => self.play_next(),
+            "prev" | "previous" => self.play_previous(),
+            "stop" => self.stop_playback(),
+            "repeat" => self.set_repeat(args),
+            "rescan" => match scan(&self.paths) {
+                Ok(songs) => {
+                    player::stop(&mut self.player);
+                    self.songs = songs;
+                    self.queue.clear();
+                    self.queue_position = None;
+                    self.playing = None;
+                    self.playback_started = None;
+                    self.playback_offset_seconds = 0;
+                    self.paused = false;
+                    self.paused_at = None;
+                    self.refresh_visible();
+                    self.status = "library rescanned".into();
+                    modules::emit(&self.settings, "rescan", None);
+                }
+                Err(error) => self.status = error.to_string(),
+            },
+            "reload" => match config::load(&self.paths) {
+                Ok(settings) => {
+                    self.repeat = settings.repeat;
+                    self.settings = settings;
+                    self.configure_image_picker();
+                    self.status = "configuration and modules reloaded".into();
+                }
+                Err(error) => self.status = error.to_string(),
+            },
+            "set" => {
+                if args
+                    .first()
+                    .map(|value| value.eq_ignore_ascii_case("skips"))
+                    .unwrap_or(false)
+                {
+                    self.set_skip_seconds(args);
+                } else if args
+                    .first()
+                    .map(|value| {
+                        value.eq_ignore_ascii_case("coversize")
+                            || value.eq_ignore_ascii_case("cover_size")
+                    })
+                    .unwrap_or(false)
+                {
+                    self.set_cover_size(args);
+                } else if args
+                    .first()
+                    .map(|value| value.eq_ignore_ascii_case("theme"))
+                    .unwrap_or(false)
+                {
+                    self.set_theme(args);
+                } else {
+                    self.set_selected_field(args);
+                }
+            }
+            _ => {
+                self.status = "commands: :search, :tag, :untag, :tags, :clear, :play, :stop, :repeat, :queue, :next, :prev, :set, :themes, :reload".into();
+            }
+        }
+    }
+
+    fn handle_modules_command(&mut self, args: &[String]) {
+        let action = args.first().map(|value| value.to_ascii_lowercase());
+        match action.as_deref() {
+            None | Some("list") => {
+                if self.settings.modules.is_empty() {
+                    self.module_info = None;
+                    self.status = "no modules installed".into();
+                    return;
+                }
+                let modules = self
+                    .settings
+                    .modules
+                    .iter()
+                    .map(|module| {
+                        format!(
+                            "{}  {}  {}",
+                            module.name,
+                            if module.enabled { "on" } else { "off" },
+                            if module.version.is_empty() {
+                                "(no version)"
+                            } else {
+                                &module.version
+                            }
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                self.module_info = Some(format!("installed modules\n\n{}", modules.join("\n")));
+                self.status = "modules (press any key to close)".into();
+            }
+            Some(command) if command == "on" || command == "off" => {
+                let Some(name) = args.get(1) else {
+                    self.status = format!("usage: :modules {command} module_name");
+                    return;
+                };
+                let enabled = command == "on";
+                let Some(module) = self
+                    .settings
+                    .modules
+                    .iter_mut()
+                    .find(|module| module.name.eq_ignore_ascii_case(name))
+                else {
+                    self.status = format!("module not found: {name}");
+                    return;
+                };
+                module.enabled = enabled;
+                let module_name = module.name.clone();
+                match config::write_settings(&self.paths, &self.settings) {
+                    Ok(()) => {
+                        self.status = format!(
+                            "module {module_name}: {}",
+                            if enabled { "on" } else { "off" }
+                        )
+                    }
+                    Err(error) => self.status = error.to_string(),
+                }
+            }
+            Some("info") => {
+                let Some(name) = args.get(1) else {
+                    self.status = "usage: :modules info module_name".into();
+                    return;
+                };
+                let Some(module) = self
+                    .settings
+                    .modules
+                    .iter()
+                    .find(|module| module.name.eq_ignore_ascii_case(name))
+                else {
+                    self.status = format!("module not found: {name}");
+                    return;
+                };
+                self.module_info = Some(self.format_module_info(module));
+                self.status = format!("module info: {name} (press any key to close)");
+            }
+            Some("reload") => {
+                self.input = "reload".into();
+                self.execute_command();
+                self.input.clear();
+            }
+            Some(_) => {
+                self.status = "usage: :modules [on|off|info] [module_name]".into();
+            }
+        }
+    }
+
+    fn format_module_info(&self, module: &config::ModuleConfig) -> String {
+        let source = module
+            .manifest_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| self.paths.settings_file.display().to_string());
+        let json = serde_json::to_string_pretty(module).unwrap_or_else(|_| "{}".into());
+        format!(
+            "module: {}\nsource: {source}\nworking directory: {}\n\n{json}",
+            module.name,
+            module.cwd.as_deref().unwrap_or("(inherited)")
+        )
+    }
+
+    fn set_selected_field(&mut self, args: &[String]) {
+        let Some(field) = args.first().map(|value| value.to_ascii_lowercase()) else {
+            self.status = "usage: :set field value".into();
+            return;
+        };
+        let values = &args[1..];
+        let Some(index) = self.visible.get(self.selected).copied() else {
+            self.status = "library is empty".into();
+            return;
+        };
+        let (path, id, directory, mut info) = {
+            let song = &self.songs[index];
+            (
+                song.directory.join("info.json"),
+                song.info.id.clone(),
+                song.directory.clone(),
+                song.info.clone(),
+            )
+        };
+        let result = match field.as_str() {
+            "title" => set_text_field(values, "title", |value| info.title = value),
+            "artist" => set_text_field(values, "artist", |value| info.artist = value),
+            "album" => set_text_field(values, "album", |value| info.album = value),
+            "desc" | "description" => {
+                set_text_field(values, "description", |value| info.description = value)
+            }
+            "image" => {
+                let Some(source) = values.first() else {
+                    return self.status = "usage: :set image path".into();
+                };
+                match copy_cover_for_song(&directory, source) {
+                    Ok(name) => {
+                        info.image = name;
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            "lyrics" => {
+                let Some(source) = values.first() else {
+                    return self.status = "usage: :set lyrics path".into();
+                };
+                let source_path = expand_tilde(source);
+                let destination = directory.join("lyrics.txt");
+                if !source_path.is_file() {
+                    Err(format!("lyrics not found: {source}"))
+                } else {
+                    if source_path != destination {
+                        if let Err(error) = std::fs::copy(&source_path, &destination) {
+                            return self.status = format!("cannot copy lyrics: {error}");
+                        }
+                    }
+                    info.lyrics = "lyrics.txt".into();
+                    Ok(())
+                }
+            }
+            "duration" => {
+                let Some(value) = values.first() else {
+                    return self.status = "usage: :set duration seconds".into();
+                };
+                match value.parse::<u64>() {
+                    Ok(seconds) => {
+                        info.duration_seconds = seconds;
+                        Ok(())
+                    }
+                    Err(_) => Err("duration must be an unsigned integer".into()),
+                }
+            }
+            _ => Err(format!(
+                "unknown set field '{field}'; use title, artist, album, desc, image, lyrics, or duration"
+            )),
+        };
+        if let Err(error) = result {
+            self.status = error;
+            return;
+        }
+        let info = info.normalized(&id);
+        match write_info_atomic(&path, &info) {
+            Ok(()) => {
+                self.songs[index].info = info;
+                self.songs[index].refresh_optional_files();
+                self.refresh_visible();
+                self.status = format!("updated song {id}");
+                modules::emit(&self.settings, "metadata", self.songs.get(index));
+            }
+            Err(error) => self.status = error.to_string(),
+        }
+    }
+
+    fn set_skip_seconds(&mut self, args: &[String]) {
+        let Some(value) = args.get(1) else {
+            self.status = "usage: :set skips seconds".into();
+            return;
+        };
+        let Ok(seconds) = value.parse::<u64>() else {
+            self.status = "skip interval must be an unsigned integer".into();
+            return;
+        };
+        if seconds == 0 {
+            self.status = "skip interval must be greater than zero".into();
+            return;
+        }
+        self.settings.skip_seconds = seconds;
+        match config::write_settings(&self.paths, &self.settings) {
+            Ok(()) => self.status = format!("skip interval: {seconds}s"),
+            Err(error) => self.status = error.to_string(),
+        }
+    }
+
+    fn set_repeat(&mut self, args: &[String]) {
+        let Some(value) = args.first().map(|value| value.to_ascii_lowercase()) else {
+            self.status = format!(
+                "repeat: {} (use :repeat on|off)",
+                if self.repeat { "on" } else { "off" }
+            );
+            return;
+        };
+        let enabled = match value.as_str() {
+            "on" | "1" | "true" => true,
+            "off" | "0" | "false" => false,
+            _ => {
+                self.status = "usage: :repeat on|off".into();
+                return;
+            }
+        };
+        self.repeat = enabled;
+        self.settings.repeat = enabled;
+        match config::write_settings(&self.paths, &self.settings) {
+            Ok(()) => self.status = format!("repeat: {}", if enabled { "on" } else { "off" }),
+            Err(error) => self.status = error.to_string(),
+        }
+    }
+
+    fn set_cover_size(&mut self, args: &[String]) {
+        let Some(value) = args.get(1) else {
+            self.status = "usage: :set coversize cells".into();
+            return;
+        };
+        let Ok(size) = value.parse::<u16>() else {
+            self.status = "cover size must be an unsigned integer".into();
+            return;
+        };
+        if !(4..=64).contains(&size) {
+            self.status = "cover size must be between 4 and 64 cells".into();
+            return;
+        }
+        self.settings.cover_size = size;
+        self.image_protocol = None;
+        self.image_path = None;
+        self.image_cells = None;
+        self.image_pending = false;
+        self.image_generation = self.image_generation.wrapping_add(1);
+        match config::write_settings(&self.paths, &self.settings) {
+            Ok(()) => self.status = format!("cover size: {size} cells"),
+            Err(error) => self.status = error.to_string(),
+        }
+    }
+
+    fn set_theme(&mut self, args: &[String]) {
+        let Some(name) = args.get(1).map(|value| value.to_ascii_lowercase()) else {
+            self.status = "usage: :set theme name".into();
+            return;
+        };
+        if !config::theme_exists(&self.settings, &name) {
+            self.status = format!("unknown theme '{name}'; use :themes or install a theme JSON");
+            return;
+        }
+        self.settings.theme = name.clone();
+        match config::write_settings(&self.paths, &self.settings) {
+            Ok(()) => self.status = format!("theme: {name}"),
+            Err(error) => self.status = error.to_string(),
+        }
+    }
+
+    fn execute_module_action(&mut self, action: &str) {
+        let Ok(tokens) = parse_command_line(action) else {
+            self.status = "module key action has invalid quoting".into();
+            return;
+        };
+        let Some(command) = tokens.first() else {
+            return;
+        };
+        let result = modules::dispatch_command(
+            &self.settings,
+            command,
+            tokens.get(1..).unwrap_or(&[]),
+            self.selected_song(),
+        );
+        if result.is_none() {
+            self.input = action.to_string();
+            self.execute_command();
+            self.input.clear();
+            return;
+        }
+        self.status = match result {
+            Some(Ok(status)) => status,
+            Some(Err(error)) => error,
+            None => unreachable!(),
+        };
+    }
+
+    fn update_selected_info<F>(&mut self, event: &str, update: F)
+    where
+        F: FnOnce(&mut SongInfo),
+    {
+        let Some(index) = self.visible.get(self.selected).copied() else {
+            self.status = "library is empty".into();
+            return;
+        };
+        let (path, id, mut info) = {
+            let song = &self.songs[index];
+            (
+                song.directory.join("info.json"),
+                song.info.id.clone(),
+                song.info.clone(),
+            )
+        };
+        update(&mut info);
+        let info = info.normalized(&id);
+        match write_info_atomic(&path, &info) {
+            Ok(()) => {
+                self.songs[index].info = info;
+                self.songs[index].refresh_optional_files();
+                self.refresh_visible();
+                self.status = format!("updated song {id}");
+                modules::emit(&self.settings, event, self.songs.get(index));
+            }
+            Err(error) => self.status = error.to_string(),
+        }
+    }
+
+    fn prepare_image(&mut self, area: Rect) {
+        if self.settings.image_mode.eq_ignore_ascii_case("none") {
+            self.image_protocol = None;
+            self.image_path = None;
+            self.image_cells = None;
+            self.image_pending = false;
+            self.image_generation = self.image_generation.wrapping_add(1);
+            return;
+        }
+        if area.width == 0 || area.height == 0 {
+            self.image_protocol = None;
+            self.image_path = None;
+            self.image_cells = None;
+            self.image_pending = false;
+            self.image_generation = self.image_generation.wrapping_add(1);
+            return;
+        }
+        let path = self.selected_song().and_then(|song| song.image.clone());
+        let cells = (area.width, area.height);
+        if path == self.image_path && self.image_cells == Some(cells) {
+            return;
+        }
+        self.image_path = path.clone();
+        self.image_cells = Some(cells);
+        self.image_protocol = None;
+        self.image_generation = self.image_generation.wrapping_add(1);
+        if let Some(path) = path {
+            self.image_pending = true;
+            let request = ImageRequest {
+                generation: self.image_generation,
+                path,
+                picker: self.image_picker,
+                cells,
+            };
+            if self.image_requests.send(request).is_err() {
+                self.image_pending = false;
+            }
+        } else {
+            self.image_pending = false;
+        }
+    }
+
+    fn receive_image_results(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(result) = self.image_results.try_recv() {
+            if result.generation == self.image_generation
+                && Some(&result.path) == self.image_path.as_ref()
+            {
+                self.image_protocol = result.protocol;
+                self.image_pending = false;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn draw(&mut self, frame: &mut Frame<'_>) {
+        let palette = Palette::from_settings(&self.settings);
+        frame.render_widget(
+            Block::default().style(Style::default().bg(palette.background)),
+            frame.area(),
+        );
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(frame.area());
+        let header = Line::from(vec![
+            Span::styled(
+                " groov ",
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(mode_name(self.mode), Style::default().fg(palette.accent)),
+            Span::raw("  "),
+            Span::styled(
+                self.paths.data_dir.to_string_lossy(),
+                Style::default().fg(palette.muted),
+            ),
+        ]);
+        frame.render_widget(Paragraph::new(header), layout[0]);
+        let filter = format!(
+            " {} songs | filter: {}{} | queue: {}",
+            self.visible.len(),
+            if self.query.is_empty() {
+                "-"
+            } else {
+                &self.query
+            },
+            if self.tags.is_empty() {
+                String::new()
+            } else {
+                format!(" tags={}", self.tags.join(","))
+            },
+            format_args!(
+                "{} | repeat: {}",
+                queue_label(self.queue.len(), self.queue_position),
+                if self.repeat { "on" } else { "off" }
+            ),
+        );
+        frame.render_widget(Paragraph::new(filter), layout[1]);
+
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(68), Constraint::Percentage(32)])
+            .split(layout[2]);
+        let items: Vec<ListItem> = self
+            .visible
+            .iter()
+            .map(|index| {
+                let song = &self.songs[*index];
+                let active = if self.playing == Some(*index) {
+                    "*"
+                } else {
+                    " "
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(active, Style::default().fg(palette.playing)),
+                    Span::raw(" "),
+                    Span::styled(song.info.id.clone(), Style::default().fg(palette.muted)),
+                    Span::raw("  "),
+                    Span::styled(
+                        truncate(&song.info.artist, 28),
+                        Style::default().fg(palette.accent),
+                    ),
+                    Span::raw(" — "),
+                    Span::raw(truncate(&song.info.title, 48)),
+                ]))
+            })
+            .collect();
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(palette.border))
+                    .title(" Library "),
+            )
+            .highlight_style(
+                Style::default()
+                    .add_modifier(Modifier::BOLD)
+                    .fg(palette.foreground)
+                    .bg(palette.highlight),
+            )
+            .highlight_symbol("> ");
+        let mut list_state = ListState::default();
+        list_state.select((!self.visible.is_empty()).then_some(self.selected));
+        frame.render_stateful_widget(list, body[0], &mut list_state);
+
+        self.draw_details(frame, body[1]);
+        let elapsed = self.playback_elapsed();
+        let (ratio, timeline_label) = if let Some(song) = self.timeline_song() {
+            let duration = song.info.duration_seconds;
+            let ratio = if duration == 0 {
+                0.0
+            } else {
+                (elapsed.min(duration) as f64) / (duration as f64)
+            };
+            let duration_label = if duration == 0 {
+                "--:--".into()
+            } else {
+                format_time(duration)
+            };
+            (
+                ratio,
+                format!(
+                    "{} — {}  {} / {}",
+                    truncate(&song.info.artist, 20),
+                    truncate(&song.info.title, 32),
+                    format_time(elapsed),
+                    duration_label
+                ),
+            )
+        } else {
+            (0.0, "no track".into())
+        };
+        frame.render_widget(
+            Gauge::default()
+                .gauge_style(Style::default().fg(palette.accent))
+                .ratio(ratio)
+                .label(timeline_label),
+            layout[3],
+        );
+        let footer = match self.mode {
+            Mode::Command => format!("{}{}", self.input_prefix, self.input),
+            Mode::Normal => self.status.clone(),
+        };
+        frame.render_widget(
+            Paragraph::new(footer).style(Style::default().fg(palette.muted)),
+            layout[4],
+        );
+        if self.show_help {
+            self.draw_help(frame, palette);
+        }
+        if let Some(info) = self.module_info.as_deref() {
+            self.draw_module_info(frame, palette, info);
+        }
+    }
+
+    fn draw_details(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let palette = Palette::from_settings(&self.settings);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.border))
+            .title(" Track ");
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(5), Constraint::Min(1)])
+            .split(inner);
+        let cover_area = centered_cover(
+            parts[1],
+            self.settings.cover_size,
+            self.image_picker.font_size,
+        );
+        self.prepare_image(cover_area);
+        self.receive_image_results();
+        if let Some(song) = self.selected_song() {
+            let metadata = vec![
+                Line::from(Span::styled(
+                    truncate(&song.info.title, 36),
+                    Style::default()
+                        .fg(palette.foreground)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(format!(
+                    "{} — {}",
+                    truncate(&song.info.artist, 22),
+                    truncate(&song.info.album, 22)
+                )),
+                Line::from(format!(
+                    "tags: {}",
+                    if song.info.tags.is_empty() {
+                        "-".into()
+                    } else {
+                        song.info.tags.join(", ")
+                    }
+                )),
+                Line::from(format!(
+                    "desc: {}",
+                    if song.info.description.is_empty() {
+                        "-"
+                    } else {
+                        &song.info.description
+                    }
+                )),
+                Line::from(format!("id: {}", song.info.id)),
+            ];
+            frame.render_widget(Paragraph::new(Text::from(metadata)), parts[0]);
+        }
+        if let Some(protocol) = self.image_protocol.as_mut() {
+            frame.render_stateful_widget(
+                StatefulImage::new(None).resize(Resize::Crop(None)),
+                cover_area,
+                protocol,
+            );
+        } else {
+            frame.render_widget(
+                Paragraph::new(if self.image_pending {
+                    "loading cover"
+                } else {
+                    "no cover"
+                })
+                .style(Style::default().fg(palette.muted)),
+                parts[1],
+            );
+        }
+    }
+
+    fn draw_help(&self, frame: &mut Frame<'_>, palette: Palette) {
+        let area = centered_rect(78, 38, frame.area());
+        let text = vec![
+            Line::from(Span::styled(
+                "groov controls",
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from("j/k or arrows move   gg/G first/last   Enter play   x stop"),
+            Line::from("h/l seek by skips    n or ] next       [ previous"),
+            Line::from("/ search              : commands       q quit"),
+            Line::from(""),
+            Line::from(":tag live   :untag draft   :tags sad rock"),
+            Line::from(":set title/artist/album/desc/image/lyrics value"),
+            Line::from(":set skips seconds"),
+            Line::from(":set coversize cells"),
+            Line::from(":set theme name"),
+            Line::from(":repeat on|off"),
+            Line::from(":modules   :modules on|off name   :modules info name"),
+            Line::from(":queue   :enqueue   :next   :prev"),
+        ];
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(Text::from(text))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(palette.border))
+                        .title(" Help "),
+                )
+                .style(
+                    Style::default()
+                        .fg(palette.foreground)
+                        .bg(palette.background),
+                )
+                .wrap(ratatui::widgets::Wrap { trim: true }),
+            area,
+        );
+    }
+
+    fn draw_module_info(&self, frame: &mut Frame<'_>, palette: Palette, info: &str) {
+        let area = centered_rect(86, 72, frame.area());
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(info)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(palette.border))
+                        .title(" Modules "),
+                )
+                .style(
+                    Style::default()
+                        .fg(palette.foreground)
+                        .bg(palette.background),
+                )
+                .wrap(ratatui::widgets::Wrap { trim: false }),
+            area,
+        );
+    }
+}
+
+pub fn run(
+    paths: AppPaths,
+    settings: Settings,
+    songs: Vec<Song>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    App::new(paths, settings, songs).run()
+}
+
+fn mode_name(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Normal => "NORMAL",
+        Mode::Command => "COMMAND",
+    }
+}
+
+fn parse_color(value: &str, fallback: Color) -> Color {
+    let value = value.trim();
+    let hex = value.strip_prefix('#').unwrap_or(value);
+    if hex.len() == 6 && hex.chars().all(|character| character.is_ascii_hexdigit()) {
+        if let (Ok(red), Ok(green), Ok(blue)) = (
+            u8::from_str_radix(&hex[0..2], 16),
+            u8::from_str_radix(&hex[2..4], 16),
+            u8::from_str_radix(&hex[4..6], 16),
+        ) {
+            return Color::Rgb(red, green, blue);
+        }
+    }
+    match value.to_ascii_lowercase().as_str() {
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "white" => Color::White,
+        "gray" | "grey" => Color::Gray,
+        "darkgray" | "dark-grey" => Color::DarkGray,
+        "reset" => Color::Reset,
+        _ => fallback,
+    }
+}
+
+fn key_name(key: &KeyEvent) -> String {
+    let base = match key.code {
+        KeyCode::Char(character) => character.to_string(),
+        KeyCode::Enter => "enter".into(),
+        KeyCode::Esc => "escape".into(),
+        KeyCode::Tab => "tab".into(),
+        KeyCode::Up => "up".into(),
+        KeyCode::Down => "down".into(),
+        KeyCode::Left => "left".into(),
+        KeyCode::Right => "right".into(),
+        _ => String::new(),
+    };
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        format!("ctrl-{base}")
+    } else if key.modifiers.contains(KeyModifiers::ALT) {
+        format!("alt-{base}")
+    } else {
+        base
+    }
+}
+
+fn truncate(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        value.to_string()
+    } else {
+        format!(
+            "{}…",
+            value
+                .chars()
+                .take(max.saturating_sub(1))
+                .collect::<String>()
+        )
+    }
+}
+
+fn configured_key(key: &KeyEvent, configured: &str) -> bool {
+    match configured.to_ascii_lowercase().as_str() {
+        "enter" => key.code == KeyCode::Enter,
+        "esc" | "escape" => key.code == KeyCode::Esc,
+        "space" => key.code == KeyCode::Char(' '),
+        value if value.chars().count() == 1 => {
+            key.code == KeyCode::Char(value.chars().next().unwrap_or('\0'))
+        }
+        _ => false,
+    }
+}
+
+fn queue_label(length: usize, position: Option<usize>) -> String {
+    match position {
+        Some(position) => format!("{}/{}", position + 1, length),
+        None if length == 0 => "-".into(),
+        None => format!("-/{}", length),
+    }
+}
+
+fn format_time(seconds: u64) -> String {
+    let hours = seconds / 3600;
+    let minutes = (seconds / 60) % 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+fn next_visible_queue_position(
+    queue: &[usize],
+    position: usize,
+    visible: &[usize],
+) -> Option<usize> {
+    (position.saturating_add(1)..queue.len()).find(|candidate| visible.contains(&queue[*candidate]))
+}
+
+fn fit_image_to_cells(
+    image: image::DynamicImage,
+    font_size: (u16, u16),
+    cells: (u16, u16),
+) -> image::DynamicImage {
+    let width = u32::from(cells.0.max(1)) * u32::from(font_size.0.max(1));
+    let height = u32::from(cells.1.max(1)) * u32::from(font_size.1.max(1));
+    image.resize_exact(width, height, image::imageops::FilterType::Triangle)
+}
+
+fn spawn_image_worker() -> (Sender<ImageRequest>, Receiver<ImageResult>) {
+    let (requests_tx, requests_rx) = mpsc::channel::<ImageRequest>();
+    let (results_tx, results_rx) = mpsc::channel::<ImageResult>();
+    thread::spawn(move || {
+        while let Ok(mut request) = requests_rx.recv() {
+            while let Ok(newer_request) = requests_rx.try_recv() {
+                request = newer_request;
+            }
+            let protocol = image::open(&request.path).ok().map(|image| {
+                let image = fit_image_to_cells(image, request.picker.font_size, request.cells);
+                let mut protocol = request.picker.new_resize_protocol(image);
+                protocol.resize_encode(
+                    &Resize::Crop(None),
+                    None,
+                    Rect::new(0, 0, request.cells.0, request.cells.1),
+                );
+                protocol
+            });
+            let result = ImageResult {
+                generation: request.generation,
+                path: request.path,
+                protocol,
+            };
+            if results_tx.send(result).is_err() {
+                break;
+            }
+        }
+    });
+    (requests_tx, results_rx)
+}
+
+fn split_tag_args(args: &[String]) -> Vec<String> {
+    let mut tags: Vec<String> = args
+        .iter()
+        .flat_map(|part| part.split(','))
+        .map(|tag| tag.trim().to_ascii_lowercase())
+        .filter(|tag| !tag.is_empty())
+        .collect();
+    tags.sort();
+    tags.dedup();
+    tags
+}
+
+fn command_names() -> &'static [&'static str] {
+    &[
+        "add", "clear", "enqueue", "next", "prev", "play", "q", "queue", "quit", "rescan",
+        "modules", "reload", "repeat", "search", "set", "themes", "stop", "tag", "tags", "untag",
+    ]
+}
+
+fn set_field_names() -> &'static [&'static str] {
+    &[
+        "album",
+        "artist",
+        "desc",
+        "description",
+        "duration",
+        "image",
+        "lyrics",
+        "skips",
+        "title",
+        "coversize",
+        "theme",
+    ]
+}
+
+fn common_prefix(values: &[String]) -> String {
+    let Some(first) = values.first() else {
+        return String::new();
+    };
+    first
+        .chars()
+        .enumerate()
+        .take_while(|(index, character)| {
+            values
+                .iter()
+                .all(|value| value.chars().nth(*index) == Some(*character))
+        })
+        .map(|(_, character)| character)
+        .collect()
+}
+
+fn expand_tilde(value: &str) -> PathBuf {
+    if value == "~" || value.starts_with("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            let suffix = value.strip_prefix('~').unwrap_or("");
+            return PathBuf::from(home).join(suffix.trim_start_matches('/'));
+        }
+    }
+    PathBuf::from(value)
+}
+
+fn shorten_home(path: &Path) -> String {
+    let path_string = path.to_string_lossy().into_owned();
+    let Some(home) = std::env::var_os("HOME") else {
+        return path_string;
+    };
+    let home = PathBuf::from(home).to_string_lossy().into_owned();
+    if path_string == home {
+        "~".into()
+    } else if let Some(suffix) = path_string.strip_prefix(&(home + "/")) {
+        format!("~/{suffix}")
+    } else {
+        path_string
+    }
+}
+
+fn path_matches(prefix: &str) -> Vec<(String, bool)> {
+    let expanded = expand_tilde(prefix);
+    let (directory, fragment) = if prefix.ends_with('/') || expanded.is_dir() {
+        (expanded.clone(), String::new())
+    } else {
+        (
+            expanded
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
+            expanded
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("")
+                .to_string(),
+        )
+    };
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return Vec::new();
+    };
+    let mut matches = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(&fragment) {
+                return None;
+            }
+            let path = entry.path();
+            let is_directory = path.is_dir();
+            let display = if prefix.starts_with('~') {
+                shorten_home(&path)
+            } else if prefix.is_empty() || (!prefix.starts_with('/') && directory == Path::new("."))
+            {
+                name
+            } else {
+                path.to_string_lossy().into_owned()
+            };
+            Some((
+                if is_directory {
+                    format!("{display}/")
+                } else {
+                    display
+                },
+                is_directory,
+            ))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| left.0.cmp(&right.0));
+    matches
+}
+
+fn set_text_field<F>(values: &[String], name: &str, set: F) -> Result<(), String>
+where
+    F: FnOnce(String),
+{
+    if values.is_empty() {
+        return Err(format!("usage: :set {name} value"));
+    }
+    set(values.join(" "));
+    Ok(())
+}
+
+fn copy_cover_for_song(directory: &std::path::Path, source: &str) -> Result<String, String> {
+    let source_path = expand_tilde(source);
+    if !source_path.is_file() {
+        return Err(format!("cover not found: {source}"));
+    }
+    let extension = source_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !["jpg", "jpeg", "png", "webp"].contains(&extension.as_str()) {
+        return Err("cover must be jpg, jpeg, png, or webp".into());
+    }
+    let name = format!("image.{extension}");
+    let destination = directory.join(&name);
+    if source_path != destination {
+        std::fs::copy(&source_path, &destination)
+            .map_err(|error| format!("cannot copy cover: {error}"))?;
+    }
+    Ok(name)
+}
+
+fn parse_command_line(line: &str) -> Result<Vec<String>, String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut token_started = false;
+    for character in line.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            token_started = true;
+            continue;
+        }
+        if character == '\\' && quote != Some('\'') {
+            escaped = true;
+            token_started = true;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            } else {
+                current.push(character);
+            }
+            token_started = true;
+            continue;
+        }
+        match character {
+            '\'' | '"' => {
+                quote = Some(character);
+                token_started = true;
+            }
+            character if character.is_whitespace() => {
+                if token_started {
+                    tokens.push(std::mem::take(&mut current));
+                    token_started = false;
+                }
+            }
+            character => {
+                current.push(character);
+                token_started = true;
+            }
+        }
+    }
+    if escaped {
+        current.push('\\');
+    }
+    if quote.is_some() {
+        return Err("unterminated quote".into());
+    }
+    if token_started {
+        tokens.push(current);
+    }
+    Ok(tokens)
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
+}
+
+fn centered_cover(area: Rect, requested_width: u16, font_size: (u16, u16)) -> Rect {
+    if area.width == 0 || area.height == 0 {
+        return area;
+    }
+    let char_width = u32::from(font_size.0.max(1));
+    let char_height = u32::from(font_size.1.max(1));
+    let mut width = requested_width.min(area.width).max(1);
+    let mut height =
+        ((u32::from(width) * char_width + char_height / 2) / char_height).max(1) as u16;
+    if height > area.height {
+        height = area.height.max(1);
+        width = ((u32::from(height) * char_height + char_width / 2) / char_width)
+            .max(1)
+            .min(u32::from(width)) as u16;
+    }
+    Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_visible_queue_position, parse_command_line, split_tag_args, App};
+    use crate::config::Settings;
+    use crate::paths::AppPaths;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn command_parser_keeps_quoted_values() {
+        assert_eq!(
+            parse_command_line(r#"set title "title bla bla bla""#).unwrap(),
+            vec!["set", "title", "title bla bla bla"]
+        );
+    }
+
+    #[test]
+    fn tag_arguments_are_lowercase_and_unique() {
+        assert_eq!(
+            split_tag_args(&["Rock,night".into(), "rock".into()]),
+            vec!["night", "rock"]
+        );
+    }
+
+    #[test]
+    fn queue_skips_tracks_removed_by_filter() {
+        assert_eq!(next_visible_queue_position(&[1, 2, 3], 0, &[3]), Some(2));
+        assert_eq!(next_visible_queue_position(&[1, 2], 1, &[]), None);
+    }
+
+    #[test]
+    fn covers_are_fitted_to_fixed_cells_without_cropping() {
+        let image = image::DynamicImage::new_rgb8(120, 40);
+        let fitted = super::fit_image_to_cells(image, (8, 16), (12, 6));
+        assert_eq!((fitted.width(), fitted.height()), (96, 96));
+    }
+
+    #[test]
+    fn modules_command_lists_info_and_toggles_modules() {
+        let temp = tempdir().unwrap();
+        let paths = AppPaths {
+            config_dir: temp.path().join("config"),
+            settings_file: temp.path().join("config/settings.json"),
+            data_dir: temp.path().join("data"),
+            songs_dir: temp.path().join("data/songs"),
+            cache_dir: temp.path().join("cache"),
+        };
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        let mut settings = Settings::default();
+        settings.modules.push(
+            serde_json::from_str(
+                r#"{
+                    "name":"demo",
+                    "version":"1.2.3",
+                    "description":"test module",
+                    "enabled":false,
+                    "command":"demo"
+                }"#,
+            )
+            .unwrap(),
+        );
+        let mut app = App::new(paths.clone(), settings, Vec::new());
+
+        app.input = "modules".into();
+        app.execute_command();
+        assert!(app.status.contains("modules"));
+        assert!(app.module_info.as_deref().unwrap().contains("demo  off"));
+
+        app.input = "modules info demo".into();
+        app.execute_command();
+        assert!(app.module_info.as_deref().unwrap().contains("version"));
+        assert!(app
+            .module_info
+            .as_deref()
+            .unwrap()
+            .contains("settings.json"));
+
+        app.module_info = None;
+        app.input = "modules on demo".into();
+        app.execute_command();
+        assert!(app.settings.modules[0].enabled);
+        assert!(paths.settings_file.is_file());
+    }
+}

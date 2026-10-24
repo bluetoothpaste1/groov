@@ -1,0 +1,19 @@
+{
+  "name": "hello",
+  "version": "1.0.0",
+  "description": "A tiny reference module for groov's extension API.",
+  "author": "groov contributors",
+  "enabled": false,
+  "command": "sh",
+  "args": ["hello.sh"],
+  "events": ["play", "stop", "metadata"],
+  "commands": [
+    { "name": "hello", "args": ["command"] }
+  ],
+  "keys": {
+    "H": "hello"
+  },
+  "env": {
+    "GROOV_HELLO_MODULE": "1"
+  }
+}
