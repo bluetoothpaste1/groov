@@ -7,6 +7,7 @@ mod tui;
 
 use std::env;
 use std::fs;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -36,6 +37,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let paths = AppPaths::discover()?;
     match command.as_str() {
         "init" => init(&paths)?,
+        "uninstall" => uninstall(&paths, args.collect())?,
         "paths" => println!("{}", paths.describe()),
         "doctor" => doctor(&paths)?,
         "theme" | "themes" => theme_command(&paths, args.collect())?,
@@ -63,6 +65,7 @@ fn print_help() {
     println!("Commands:");
     println!("  tui                         open the player (default)");
     println!("  init                        create config and data directories");
+    println!("  uninstall                   permanently remove groov data (asks for confirmation)");
     println!("  add FILE [options]          move audio into a new song directory (--copy/--dry-run available)");
     println!("  edit ID [options]           update title, artist, album, description, tags, cover, lyrics");
     println!("  list [--tag TAG]...         list songs, optionally filtered by all tags");
@@ -234,6 +237,54 @@ fn init(paths: &AppPaths) -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("data directory ready at {}", paths.data_dir.display());
     Ok(())
+}
+
+fn uninstall(paths: &AppPaths, args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    if !args.is_empty() {
+        return Err("uninstall takes no arguments".into());
+    }
+    println!("WARNING: this permanently deletes all groov user data.");
+    println!("It removes the library (audio, covers, metadata and lyrics), configuration, modules, themes, and cache.");
+    println!();
+    println!("The following directories will be removed:");
+    println!("{}", paths.describe());
+    print!("Continue with uninstall? [y/N] ");
+    io::stdout().flush()?;
+
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        println!("uninstall cancelled; no files were changed");
+        return Ok(());
+    }
+
+    for (label, path) in [
+        ("configuration", paths.config_dir.as_path()),
+        ("data", paths.data_dir.as_path()),
+        ("cache", paths.cache_dir.as_path()),
+    ] {
+        if remove_path(path)? {
+            println!("removed {label}: {}", path.display());
+        } else {
+            println!("not found {label}: {}", path.display());
+        }
+    }
+    println!("groov user data removed");
+    Ok(())
+}
+
+fn remove_path(path: &Path) -> Result<bool, io::Error> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        fs::remove_file(path)?;
+    } else {
+        fs::remove_dir_all(path)?;
+    }
+    Ok(true)
 }
 
 fn doctor(paths: &AppPaths) -> Result<(), Box<dyn std::error::Error>> {

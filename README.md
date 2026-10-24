@@ -32,7 +32,9 @@ make release
 ./target/debug/groov
 ```
 
-Useful commands are `groov list`, `groov list --tag rock --tag night`, `groov scan`, `groov doctor`, `groov paths`, `groov theme list`, `groov theme install FILE`, `groov theme use NAME`, and `groov modules`. `groov add` accepts `--album`, `--image`, `--lyrics`, `--id`, `--copy`, and `--dry-run` as well. By default it moves the source file; `--copy` keeps the original in Downloads, while `--dry-run` only prints the planned import. If `ffprobe` is installed, title, artist, album, and duration are read automatically. `groov edit 13 --title "New title" --tag live --untag draft` updates an existing song atomically.
+Useful commands are `groov list`, `groov list --tag rock --tag night`, `groov scan`, `groov doctor`, `groov paths`, `groov theme list`, `groov theme install FILE`, `groov theme use NAME`, `groov modules`, and `groov uninstall`. `groov add` accepts `--album`, `--image`, `--lyrics`, `--id`, `--copy`, and `--dry-run` as well. By default it moves the source file; `--copy` keeps the original in Downloads, while `--dry-run` only prints the planned import. If `ffprobe` is installed, title, artist, album, and duration are read automatically. `groov edit 13 --title "New title" --tag live --untag draft` updates an existing song atomically.
+
+`groov uninstall` permanently removes groov's configuration, modules, themes, cache, and complete local library, including audio, covers, metadata, and lyrics. It prints every target path and requires an explicit `y` or `yes` confirmation; any other answer cancels the operation. The installed executable is left in place so the command can finish safely.
 
 ## Files and directories
 
@@ -57,11 +59,13 @@ songs/13/lyrics.txt      optional
 
 ## Controls
 
-groov has two actual interaction modes: `NORMAL` for navigation/playback and `COMMAND` for commands. Search and help are commands/panels, so they do not create hidden state modes. Normal mode uses `j/k` or arrow keys to move, `Space` to play/pause or start the selected track, `x` to stop, `h/l` to seek by the configured skip interval, `n`/`]` and `[` for queue navigation, `a` to enqueue, `/` to enter `:search`, `:` for commands, `?` for help, and `q` to quit. Commands include `:tag live`, `:untag draft`, `:tags sad rock`, `:repeat on`, `:repeat off`, `:set title "New title"`, `:set desc "A favorite track"`, `:set artist "Rock group"`, `:set image ~/cover.jpg`, `:set lyrics ~/lyrics.txt`, `:set skips 10`, `:set coversize 16`, `:set theme ocean`, `:reload`, `:queue`, `:enqueue`, `:next`, `:prev`, `:clear`, `:play`, `:stop`, `:rescan`, and `:q`.
+groov has two view modes: `NORMAL` shows the library and full playback controls, while `COMPACT` renders only the current track's cover. Use `:mode compact` to enter it and `:mode normal` to return. In compact mode `j/k` or the arrow keys immediately start the next/previous visible track, `h/l` seek, and `Space` pauses or resumes playback. The separate `COMMAND` input state opens with `:`; search and help are commands/panels. Normal mode uses `j/k` or arrow keys to move, `Space` to play/pause or start the selected track, `x` to stop, `h/l` to seek by the configured skip interval, `n`/`]` and `[` for queue navigation, `a` to enqueue, `/` to enter `:search`, `?` for help, and `q` to quit. Commands include `:mode normal|compact`, `:follow on|off`, `:tag live`, `:untag draft`, `:tags sad rock`, `:repeat on`, `:repeat off`, `:set title "New title"`, `:set desc "A favorite track"`, `:set artist "Rock group"`, `:set image ~/cover.jpg`, `:set lyrics ~/lyrics.txt`, `:set skips 10`, `:set coversize 16`, `:set theme ocean`, `:reload`, `:queue`, `:enqueue`, `:next`, `:prev`, `:clear`, `:play`, `:stop`, `:rescan`, and `:q`.
 
 Cover art is rendered by `ratatui-image` into one fixed square area. The full source image is scaled directly into that area without cropping or empty padding. `image_mode: "auto"` deliberately uses ANSI half blocks, which work in Linux and macOS terminals, SSH, tmux, and IDE terminals. Sixel, Kitty, and iTerm2 are explicit opt-ins (`sixel`, `kitty`, `iterm2`); `none` disables images. The audio command is configurable through `{file}` and `{start}`; its standard streams are isolated so backend output cannot corrupt the TUI. groov always restores raw mode and the alternate screen when the terminal or player exits with an error.
 
 While a track is playing, the TUI shows its elapsed time and progress bar. `h` and `l` seek backward or forward by `skip_seconds` (5 seconds by default); `:set skips 10` changes and persists that interval. `:repeat on` repeats the current track when it ends; `:repeat off` returns to normal queue progression. The repeat setting is persisted in `settings.json`.
+
+`:follow on` keeps the selected library row aligned with the track that starts playing, including automatic queue transitions. `:follow off` preserves manual selection; the setting is persisted in `settings.json`.
 
 In command mode, `Tab` completes command names, `set` fields, and paths for `image`/`lyrics`. Path completion understands both absolute paths and `~/...`.
 

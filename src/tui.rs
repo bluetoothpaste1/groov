@@ -26,9 +26,15 @@ use crate::paths::AppPaths;
 use crate::player;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Mode {
+enum InputMode {
     Normal,
     Command,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    Normal,
+    Compact,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -118,7 +124,8 @@ struct App {
     songs: Vec<Song>,
     visible: Vec<usize>,
     selected: usize,
-    mode: Mode,
+    input_mode: InputMode,
+    view_mode: ViewMode,
     input: String,
     input_prefix: char,
     show_help: bool,
@@ -134,6 +141,7 @@ struct App {
     paused: bool,
     paused_at: Option<Instant>,
     repeat: bool,
+    follow_playback: bool,
     queue: Vec<usize>,
     queue_position: Option<usize>,
     should_quit: bool,
@@ -156,13 +164,15 @@ impl App {
         let (module_output_tx, module_outputs) = mpsc::channel();
         let module_runtime = modules::ModuleRuntime::new(module_output_tx.clone());
         let repeat = settings.repeat;
+        let follow_playback = settings.follow_playback;
         let mut app = Self {
             paths,
             settings,
             songs,
             visible: Vec::new(),
             selected: 0,
-            mode: Mode::Normal,
+            input_mode: InputMode::Normal,
+            view_mode: ViewMode::Normal,
             input: String::new(),
             input_prefix: ':',
             show_help: false,
@@ -178,6 +188,7 @@ impl App {
             paused: false,
             paused_at: None,
             repeat,
+            follow_playback,
             queue: Vec::new(),
             queue_position: None,
             should_quit: false,
@@ -349,6 +360,11 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
+        if self.view_mode == ViewMode::Compact && self.input_mode == InputMode::Normal {
+            self.show_help = false;
+            self.module_info = None;
+            self.module_widget = None;
+        }
         if let Some(widget) = self.module_widget.as_ref() {
             if self
                 .module_runtime
@@ -367,9 +383,9 @@ impl App {
             self.show_help = false;
             return false;
         }
-        match self.mode {
-            Mode::Normal => self.handle_normal(key),
-            Mode::Command => self.handle_input(key),
+        match self.input_mode {
+            InputMode::Normal => self.handle_normal(key),
+            InputMode::Command => self.handle_input(key),
         }
     }
 
@@ -392,10 +408,31 @@ impl App {
             return false;
         }
         if configured_key(&key, &self.settings.keymap.search) {
-            self.mode = Mode::Command;
+            self.input_mode = InputMode::Command;
             self.input = "search ".into();
             self.input_prefix = '/';
             return false;
+        }
+        if self.view_mode == ViewMode::Compact {
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.compact_step(1);
+                    return false;
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.compact_step(-1);
+                    return false;
+                }
+                KeyCode::Char('h') => {
+                    self.seek(-(self.settings.skip_seconds as i64));
+                    return false;
+                }
+                KeyCode::Char('l') => {
+                    self.seek(self.settings.skip_seconds as i64);
+                    return false;
+                }
+                _ => {}
+            }
         }
         let key_name = key_name(&key);
         if let Some(action) = modules::key_action(&self.settings, &key_name) {
@@ -448,7 +485,7 @@ impl App {
                 false
             }
             KeyCode::Char(':') => {
-                self.mode = Mode::Command;
+                self.input_mode = InputMode::Command;
                 self.input.clear();
                 self.input_prefix = ':';
                 false
@@ -467,14 +504,14 @@ impl App {
     fn handle_input(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc => {
-                self.mode = Mode::Normal;
+                self.input_mode = InputMode::Normal;
                 self.input.clear();
                 self.input_prefix = ':';
             }
             KeyCode::Enter => {
                 self.execute_command();
                 self.input.clear();
-                self.mode = Mode::Normal;
+                self.input_mode = InputMode::Normal;
                 self.input_prefix = ':';
             }
             KeyCode::Backspace => {
@@ -532,6 +569,32 @@ impl App {
                     })
                     .collect::<Vec<_>>();
                 self.apply_word_completion(&input, prefix, names);
+            }
+            return;
+        }
+        if lower.starts_with("mode") {
+            let after_mode = trimmed[4..].trim_start();
+            if !after_mode.contains(char::is_whitespace) {
+                let prefix = after_mode.to_ascii_lowercase();
+                let matches = ["compact", "normal"]
+                    .iter()
+                    .filter(|name| name.starts_with(&prefix))
+                    .map(|name| (*name).to_string())
+                    .collect::<Vec<_>>();
+                self.apply_word_completion(&input, after_mode, matches);
+            }
+            return;
+        }
+        if lower.starts_with("follow") {
+            let after_follow = trimmed[6..].trim_start();
+            if !after_follow.contains(char::is_whitespace) {
+                let prefix = after_follow.to_ascii_lowercase();
+                let matches = ["off", "on"]
+                    .iter()
+                    .filter(|name| name.starts_with(&prefix))
+                    .map(|name| (*name).to_string())
+                    .collect::<Vec<_>>();
+                self.apply_word_completion(&input, after_follow, matches);
             }
             return;
         }
@@ -658,6 +721,11 @@ impl App {
             Ok(child) => {
                 self.player = Some(child);
                 self.playing = Some(index);
+                if self.follow_playback {
+                    if let Some(selected) = self.visible.iter().position(|item| *item == index) {
+                        self.selected = selected;
+                    }
+                }
                 self.playback_started = Some(Instant::now());
                 self.playback_offset_seconds = offset_seconds;
                 self.status = format!("playing {} — {}", song.info.artist, song.info.title);
@@ -796,6 +864,51 @@ impl App {
         self.status = format!("queued {}", self.songs[index].info.title);
     }
 
+    fn compact_step(&mut self, delta: i32) {
+        if self.visible.is_empty() {
+            self.status = "library is empty".into();
+            return;
+        }
+        if self.queue.is_empty() {
+            self.queue = self.visible.clone();
+        }
+        let current = self
+            .playing
+            .or_else(|| self.visible.get(self.selected).copied());
+        if self.playing.is_none() && current.is_some_and(|index| !self.queue.contains(&index)) {
+            self.queue = self.visible.clone();
+        }
+        let position = if self.playing.is_some() {
+            self.queue_position.or_else(|| {
+                current.and_then(|index| self.queue.iter().position(|item| *item == index))
+            })
+        } else {
+            current.and_then(|index| self.queue.iter().position(|item| *item == index))
+        };
+        let Some(position) = position else {
+            return;
+        };
+        let target = if delta > 0 {
+            next_visible_queue_position(&self.queue, position, &self.visible)
+        } else {
+            previous_visible_queue_position(&self.queue, position, &self.visible)
+        };
+        let Some(target) = target else {
+            self.status = if delta > 0 {
+                "already at queue end".into()
+            } else {
+                "already at queue start".into()
+            };
+            return;
+        };
+        self.queue_position = Some(target);
+        let index = self.queue[target];
+        if let Some(selected) = self.visible.iter().position(|item| *item == index) {
+            self.selected = selected;
+        }
+        self.start_song_at(index, 0);
+    }
+
     fn execute_command(&mut self) {
         let input = self.input.trim().to_string();
         let tokens = match parse_command_line(&input) {
@@ -807,6 +920,14 @@ impl App {
         };
         let command = tokens.first().map(String::as_str).unwrap_or("");
         let args = tokens.get(1..).unwrap_or(&[]);
+        if command.eq_ignore_ascii_case("mode") {
+            self.set_view_mode(args);
+            return;
+        }
+        if command.eq_ignore_ascii_case("follow") {
+            self.set_follow_playback(args);
+            return;
+        }
         if command.eq_ignore_ascii_case("modules") {
             self.handle_modules_command(args);
             return;
@@ -920,6 +1041,7 @@ impl App {
                 Ok(settings) => {
                     self.module_runtime.reset();
                     self.repeat = settings.repeat;
+                    self.follow_playback = settings.follow_playback;
                     self.settings = settings;
                     self.configure_image_picker();
                     self.status = "configuration and modules reloaded".into();
@@ -953,7 +1075,7 @@ impl App {
                 }
             }
             _ => {
-                self.status = "commands: :search, :tag, :untag, :tags, :clear, :play, :stop, :repeat, :queue, :next, :prev, :set, :themes, :reload".into();
+                self.status = "commands: :mode, :search, :tag, :untag, :tags, :clear, :play, :stop, :repeat, :follow, :queue, :next, :prev, :set, :themes, :reload".into();
             }
         }
     }
@@ -1190,6 +1312,66 @@ impl App {
         }
     }
 
+    fn set_follow_playback(&mut self, args: &[String]) {
+        let Some(value) = args.first().map(|value| value.to_ascii_lowercase()) else {
+            self.status = format!(
+                "follow: {} (use :follow on|off)",
+                if self.follow_playback { "on" } else { "off" }
+            );
+            return;
+        };
+        if args.len() != 1 {
+            self.status = "usage: :follow on|off".into();
+            return;
+        }
+        let enabled = match value.as_str() {
+            "on" | "1" | "true" => true,
+            "off" | "0" | "false" => false,
+            _ => {
+                self.status = "usage: :follow on|off".into();
+                return;
+            }
+        };
+        self.follow_playback = enabled;
+        self.settings.follow_playback = enabled;
+        match config::write_settings(&self.paths, &self.settings) {
+            Ok(()) => self.status = format!("follow: {}", if enabled { "on" } else { "off" }),
+            Err(error) => self.status = error.to_string(),
+        }
+    }
+
+    fn set_view_mode(&mut self, args: &[String]) {
+        let Some(value) = args.first().map(|value| value.to_ascii_lowercase()) else {
+            self.status = format!(
+                "mode: {} (use :mode normal|compact)",
+                view_mode_name(self.view_mode).to_ascii_lowercase()
+            );
+            return;
+        };
+        if args.len() != 1 {
+            self.status = "usage: :mode normal|compact".into();
+            return;
+        }
+        let mode = match value.as_str() {
+            "normal" => ViewMode::Normal,
+            "compact" => ViewMode::Compact,
+            _ => {
+                self.status = "usage: :mode normal|compact".into();
+                return;
+            }
+        };
+        self.view_mode = mode;
+        self.show_help = false;
+        self.module_info = None;
+        self.module_widget = None;
+        self.image_protocol = None;
+        self.image_path = None;
+        self.image_cells = None;
+        self.image_pending = false;
+        self.image_generation = self.image_generation.wrapping_add(1);
+        self.status = format!("mode: {}", view_mode_name(mode).to_ascii_lowercase());
+    }
+
     fn set_cover_size(&mut self, args: &[String]) {
         let Some(value) = args.get(1) else {
             self.status = "usage: :set coversize cells".into();
@@ -1289,7 +1471,7 @@ impl App {
         }
     }
 
-    fn prepare_image(&mut self, area: Rect) {
+    fn prepare_image(&mut self, area: Rect, path: Option<PathBuf>) {
         if self.settings.image_mode.eq_ignore_ascii_case("none") {
             self.image_protocol = None;
             self.image_path = None;
@@ -1306,7 +1488,6 @@ impl App {
             self.image_generation = self.image_generation.wrapping_add(1);
             return;
         }
-        let path = self.selected_song().and_then(|song| song.image.clone());
         let cells = (area.width, area.height);
         if path == self.image_path && self.image_cells == Some(cells) {
             return;
@@ -1401,6 +1582,10 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>) {
+        if self.view_mode == ViewMode::Compact {
+            self.draw_compact(frame);
+            return;
+        }
         let palette = Palette::from_settings(&self.settings);
         frame.render_widget(
             Block::default().style(Style::default().bg(palette.background)),
@@ -1424,7 +1609,10 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
-            Span::styled(mode_name(self.mode), Style::default().fg(palette.accent)),
+            Span::styled(
+                mode_name(self.input_mode),
+                Style::default().fg(palette.accent),
+            ),
             Span::raw("  "),
             Span::styled(
                 self.paths.data_dir.to_string_lossy(),
@@ -1533,9 +1721,9 @@ impl App {
                 .label(timeline_label),
             layout[3],
         );
-        let footer = match self.mode {
-            Mode::Command => format!("{}{}", self.input_prefix, self.input),
-            Mode::Normal => self.status.clone(),
+        let footer = match self.input_mode {
+            InputMode::Command => format!("{}{}", self.input_prefix, self.input),
+            InputMode::Normal => self.status.clone(),
         };
         frame.render_widget(
             Paragraph::new(footer).style(Style::default().fg(palette.muted)),
@@ -1549,6 +1737,34 @@ impl App {
         }
         if let Some(widget) = self.module_widget.as_ref() {
             self.draw_module_widget(frame, palette, widget);
+        }
+    }
+
+    fn draw_compact(&mut self, frame: &mut Frame<'_>) {
+        let palette = Palette::from_settings(&self.settings);
+        let area = frame.area();
+        frame.render_widget(
+            Block::default().style(Style::default().bg(palette.background)),
+            area,
+        );
+        let cover_area = centered_cover(area, area.width, self.image_picker.font_size);
+        let image_path = self.timeline_song().and_then(|song| song.image.clone());
+        self.prepare_image(cover_area, image_path);
+        self.receive_image_results();
+        if let Some(protocol) = self.image_protocol.as_mut() {
+            frame.render_stateful_widget(
+                StatefulImage::new(None).resize(Resize::Crop(None)),
+                cover_area,
+                protocol,
+            );
+        }
+        if self.input_mode == InputMode::Command {
+            let prompt = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
+            frame.render_widget(
+                Paragraph::new(format!("{}{}", self.input_prefix, self.input))
+                    .style(Style::default().fg(palette.muted).bg(palette.background)),
+                prompt,
+            );
         }
     }
 
@@ -1569,7 +1785,8 @@ impl App {
             self.settings.cover_size,
             self.image_picker.font_size,
         );
-        self.prepare_image(cover_area);
+        let image_path = self.selected_song().and_then(|song| song.image.clone());
+        self.prepare_image(cover_area, image_path);
         self.receive_image_results();
         if let Some(song) = self.selected_song() {
             let metadata = vec![
@@ -1641,7 +1858,8 @@ impl App {
             Line::from(":set skips seconds"),
             Line::from(":set coversize cells"),
             Line::from(":set theme name"),
-            Line::from(":repeat on|off"),
+            Line::from(":mode normal|compact"),
+            Line::from(":repeat on|off   :follow on|off"),
             Line::from(":modules   :modules on|off name   :modules info name"),
             Line::from(":queue   :enqueue   :next   :prev"),
         ];
@@ -1811,10 +2029,17 @@ pub fn run(
     App::new(paths, settings, songs).run()
 }
 
-fn mode_name(mode: Mode) -> &'static str {
+fn mode_name(mode: InputMode) -> &'static str {
     match mode {
-        Mode::Normal => "NORMAL",
-        Mode::Command => "COMMAND",
+        InputMode::Normal => "NORMAL",
+        InputMode::Command => "COMMAND",
+    }
+}
+
+fn view_mode_name(mode: ViewMode) -> &'static str {
+    match mode {
+        ViewMode::Normal => "NORMAL",
+        ViewMode::Compact => "COMPACT",
     }
 }
 
@@ -1920,6 +2145,16 @@ fn next_visible_queue_position(
     (position.saturating_add(1)..queue.len()).find(|candidate| visible.contains(&queue[*candidate]))
 }
 
+fn previous_visible_queue_position(
+    queue: &[usize],
+    position: usize,
+    visible: &[usize],
+) -> Option<usize> {
+    (0..position)
+        .rev()
+        .find(|candidate| visible.contains(&queue[*candidate]))
+}
+
 fn fit_image_to_cells(
     image: image::DynamicImage,
     font_size: (u16, u16),
@@ -1975,8 +2210,9 @@ fn split_tag_args(args: &[String]) -> Vec<String> {
 
 fn command_names() -> &'static [&'static str] {
     &[
-        "add", "clear", "enqueue", "next", "prev", "play", "q", "queue", "quit", "rescan",
-        "modules", "reload", "repeat", "search", "set", "themes", "stop", "tag", "tags", "untag",
+        "add", "clear", "enqueue", "next", "prev", "play", "q", "queue", "quit", "rescan", "mode",
+        "follow", "modules", "reload", "repeat", "search", "set", "themes", "stop", "tag", "tags",
+        "untag",
     ]
 }
 
@@ -2221,8 +2457,12 @@ fn centered_cover(area: Rect, requested_width: u16, font_size: (u16, u16)) -> Re
 
 #[cfg(test)]
 mod tests {
-    use super::{next_visible_queue_position, parse_command_line, split_tag_args, App};
+    use super::{
+        next_visible_queue_position, parse_command_line, previous_visible_queue_position,
+        split_tag_args, App, InputMode, ViewMode,
+    };
     use crate::config::Settings;
+    use crate::library::{Song, SongInfo};
     use crate::paths::AppPaths;
     use std::fs;
     use tempfile::tempdir;
@@ -2247,6 +2487,143 @@ mod tests {
     fn queue_skips_tracks_removed_by_filter() {
         assert_eq!(next_visible_queue_position(&[1, 2, 3], 0, &[3]), Some(2));
         assert_eq!(next_visible_queue_position(&[1, 2], 1, &[]), None);
+        assert_eq!(
+            previous_visible_queue_position(&[1, 2, 3], 2, &[1]),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn mode_command_switches_view_mode_and_reports_usage() {
+        let temp = tempdir().unwrap();
+        let paths = AppPaths {
+            config_dir: temp.path().join("config"),
+            settings_file: temp.path().join("config/settings.json"),
+            data_dir: temp.path().join("data"),
+            songs_dir: temp.path().join("data/songs"),
+            cache_dir: temp.path().join("cache"),
+        };
+        let mut app = App::new(paths, Settings::default(), Vec::new());
+
+        app.input = "mode compact".into();
+        app.execute_command();
+        assert_eq!(app.view_mode, ViewMode::Compact);
+        assert_eq!(app.input_mode, InputMode::Normal);
+
+        app.input = "mode".into();
+        app.execute_command();
+        assert!(app.status.contains("compact"));
+
+        app.input = "mode widescreen".into();
+        app.execute_command();
+        assert_eq!(app.view_mode, ViewMode::Compact);
+        assert_eq!(app.status, "usage: :mode normal|compact");
+
+        app.input = "mode normal extra".into();
+        app.execute_command();
+        assert_eq!(app.view_mode, ViewMode::Compact);
+        assert_eq!(app.status, "usage: :mode normal|compact");
+
+        app.input = "mode c".into();
+        app.complete_command();
+        assert_eq!(app.input, "mode compact ");
+    }
+
+    #[test]
+    fn follow_command_persists_and_validates_setting() {
+        let temp = tempdir().unwrap();
+        let paths = AppPaths {
+            config_dir: temp.path().join("config"),
+            settings_file: temp.path().join("config/settings.json"),
+            data_dir: temp.path().join("data"),
+            songs_dir: temp.path().join("data/songs"),
+            cache_dir: temp.path().join("cache"),
+        };
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        let mut app = App::new(paths.clone(), Settings::default(), Vec::new());
+
+        app.input = "follow on".into();
+        app.execute_command();
+        assert!(app.follow_playback);
+        assert!(app.settings.follow_playback);
+        assert!(fs::read_to_string(&paths.settings_file)
+            .unwrap()
+            .contains("\"follow_playback\": true"));
+
+        app.input = "follow".into();
+        app.execute_command();
+        assert!(app.status.contains("follow: on"));
+
+        app.input = "follow maybe".into();
+        app.execute_command();
+        assert_eq!(app.status, "usage: :follow on|off");
+        assert!(app.follow_playback);
+
+        app.input = "follow off".into();
+        app.execute_command();
+        assert!(!app.follow_playback);
+        assert!(!app.settings.follow_playback);
+    }
+
+    #[test]
+    fn compact_navigation_starts_adjacent_tracks_immediately() {
+        let temp = tempdir().unwrap();
+        let paths = AppPaths {
+            config_dir: temp.path().join("config"),
+            settings_file: temp.path().join("config/settings.json"),
+            data_dir: temp.path().join("data"),
+            songs_dir: temp.path().join("data/songs"),
+            cache_dir: temp.path().join("cache"),
+        };
+        let song = |id: &str| Song {
+            info: SongInfo {
+                id: id.into(),
+                artist: "Artist".into(),
+                lyrics: String::new(),
+                title: id.into(),
+                album: String::new(),
+                description: String::new(),
+                image: String::new(),
+                tags: Vec::new(),
+                duration_seconds: 0,
+                added_at: String::new(),
+            },
+            directory: temp.path().join(id),
+            audio: temp.path().join(format!("{id}.mp3")),
+            image: None,
+            lyrics: None,
+        };
+        let settings = Settings {
+            player_command: "true {file}".into(),
+            follow_playback: true,
+            ..Settings::default()
+        };
+        let mut app = App::new(
+            paths,
+            settings,
+            vec![song("one"), song("two"), song("three")],
+        );
+
+        app.queue = app.visible.clone();
+        app.queue_position = Some(0);
+        app.play_next();
+        assert_eq!(app.playing, Some(1));
+        assert_eq!(app.selected, 1);
+        crate::player::stop(&mut app.player);
+        app.playing = None;
+        app.playback_started = None;
+        app.playback_offset_seconds = 0;
+        app.queue_position = Some(0);
+        app.selected = 0;
+
+        app.view_mode = ViewMode::Compact;
+        app.compact_step(1);
+        assert_eq!(app.playing, Some(1));
+        assert_eq!(app.selected, 1);
+        app.compact_step(-1);
+        assert_eq!(app.playing, Some(0));
+        assert_eq!(app.selected, 0);
+        crate::player::stop(&mut app.player);
     }
 
     #[test]

@@ -21,6 +21,7 @@ groov modules                      список модулей
 groov modules info NAME            подробности модуля
 groov theme list                   список тем
 groov doctor                       диагностика
+groov uninstall                    удалить все данные после подтверждения
 make docs-check                    проверить ссылки и code fences
 make release                       собрать release binary
 make install PREFIX=~/.local       установить binary и man page

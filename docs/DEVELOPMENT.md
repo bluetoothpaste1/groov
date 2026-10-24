@@ -15,7 +15,7 @@
 
 | Файл | Ответственность |
 |---|---|
-| src/main.rs | CLI dispatch, init, doctor, import, edit, list, theme и module registry |
+| src/main.rs | CLI dispatch, init, uninstall, doctor, import, edit, list, theme и module registry |
 | src/config.rs | Settings, ModuleConfig, ThemeConfig, JSON loading/writing, discovery |
 | src/paths.rs | XDG path resolution и создание каталогов |
 | src/library.rs | SongInfo, Song, scan, atomic metadata writes |
@@ -51,11 +51,12 @@ CLI-команды list, scan, add и edit не запускают TUI. Кома
 App разделяет:
 
 - domain state: songs, visible, selected, tags, query;
-- playback state: player, playing, queue, position, pause, repeat;
-- input state: mode, input, prefix, help/module overlay;
+- playback state: player, playing, queue, position, pause, repeat, follow-playback preference;
+- input state: command input mode, input, prefix, help/module overlay;
+- view state: `NORMAL` full layout or `COMPACT` cover-only layout;
 - render state: image protocol, generation, pending worker request.
 
-Режимов ровно два: Normal и Command. Если новая функция может быть реализована командой или overlay, не добавляйте новый mode без необходимости.
+Состояние ввода разделено на `Normal` и `Command`, а отображение — на `Normal` и `Compact`. Команда `:mode normal|compact` меняет только view state. Если новая функция может быть реализована командой или overlay, не добавляйте новый state без необходимости.
 
 ### Render loop
 
@@ -81,6 +82,8 @@ Ratatui использует buffered diff renderer. Worker изображени
 4. Добавьте раздел в USER_GUIDE.md и REFERENCE.md.
 5. Если команда меняет settings или library, документируйте atomicity и side effects.
 6. Добавьте unit/integration test.
+
+Команды, которые удаляют пользовательские данные, должны явно перечислять пути, требовать интерактивное подтверждение и оставлять данные нетронутыми при любом ответе кроме `y`/`yes`.
 
 ### Новая TUI-команда
 

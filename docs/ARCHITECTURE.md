@@ -41,6 +41,7 @@ Paths in metadata are relative to the song directory. Missing `Lyrics` or `Image
   "player_command": "ffplay -nodisp -autoexit -loglevel quiet {file}",
   "skip_seconds": 5,
   "repeat": false,
+  "follow_playback": false,
   "cover_size": 16,
   "themes": {},
   "modules": [
@@ -85,7 +86,7 @@ The executable can inspect `GROOV_EVENT_JSON` and return immediately; module fai
 
 ## Interface model
 
-The TUI has two modes: `NORMAL` (navigation and playback) and `COMMAND` (the `:` prompt). Search is the `search` command prefilled by `/`; help is a transient overlay toggled by `?`. Keeping only states that change key dispatch makes the state machine auditable and leaves extensions free to add commands without adding modes. `:reload` reloads settings, themes, and module manifests without restarting the player. Playback is delegated to a configurable process, currently `ffplay`; replacing it does not require changing the library or TUI. Pressing `Space` starts or pauses playback; `:queue`, `:enqueue`, `:next`, and `:prev` manage the queue. `:repeat on` restarts the completed track from zero, while `:repeat off` advances through the queue. The timeline is a diff-rendered gauge driven by elapsed playback time; `h` and `l` restart the player at an offset of `skip_seconds`. A custom `player_command` may use `{file}` and `{start}` placeholders.
+The TUI separates input state from view state. Input is `NORMAL` for navigation or `COMMAND` for the `:` prompt; the view is `NORMAL` for the full library and `COMPACT` for a cover-only player. `:mode normal|compact` changes the view without writing settings. Search is the `search` command prefilled by `/`; help is a transient overlay toggled by `?`. Compact rendering deliberately skips every widget except the current cover, while `j/k` (and arrows) immediately start the next or previous visible queue item. `:follow on|off` persists whether the selected library row follows the track that starts playing; the default is off. `:reload` reloads settings, themes, and module manifests without restarting the player. Playback is delegated to a configurable process, currently `ffplay`; replacing it does not require changing the library or TUI. Pressing `Space` starts or pauses playback; `:queue`, `:enqueue`, `:next`, and `:prev` manage the queue. `:repeat on` restarts the completed track from zero, while `:repeat off` advances through the queue. The timeline is a diff-rendered gauge driven by elapsed playback time; `h` and `l` restart the player at an offset of `skip_seconds`. A custom `player_command` may use `{file}` and `{start}` placeholders.
 
 Tag commands have one responsibility each: `:tag name` adds a tag to the selected song, `:untag name` removes it, and `:tags a b` replaces the active library filter with an AND selection. An empty `:tags` clears the filter. This keeps metadata editing separate from choosing the current playlist.
 

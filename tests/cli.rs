@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use tempfile::tempdir;
 
@@ -15,6 +16,29 @@ fn run_cli(root: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .output()
         .expect("groov command should start")
+}
+
+fn run_cli_with_input(root: &Path, args: &[&str], input: &str) -> std::process::Output {
+    let config = root.join("config");
+    let data = root.join("data");
+    let cache = root.join("cache");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_groov"))
+        .env("XDG_CONFIG_HOME", config)
+        .env("XDG_DATA_HOME", data)
+        .env("XDG_CACHE_HOME", cache)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("groov command should start");
+    child
+        .stdin
+        .take()
+        .expect("stdin should be piped")
+        .write_all(input.as_bytes())
+        .expect("confirmation should be written");
+    child.wait_with_output().expect("groov command should exit")
 }
 
 #[test]
@@ -80,4 +104,37 @@ fn cli_reports_the_release_version() {
         String::from_utf8_lossy(&version.stdout).trim(),
         "groov 1.0.0"
     );
+}
+
+#[test]
+fn cli_uninstall_requires_confirmation_and_removes_all_user_data() {
+    let temp = tempdir().unwrap();
+    let init = run_cli(temp.path(), &["init"]);
+    assert!(init.status.success(), "init failed: {:?}", init);
+
+    let config_dir = temp.path().join("config/groov");
+    let data_dir = temp.path().join("data/groov");
+    let cache_dir = temp.path().join("cache/groov");
+    fs::create_dir_all(data_dir.join("songs/1")).unwrap();
+    fs::write(config_dir.join("settings.json"), b"settings").unwrap();
+    fs::write(data_dir.join("songs/1/song.mp3"), b"audio").unwrap();
+    fs::write(data_dir.join("songs/1/image.jpg"), b"cover").unwrap();
+    fs::write(cache_dir.join("art.cache"), b"cache").unwrap();
+
+    let cancelled = run_cli_with_input(temp.path(), &["uninstall"], "n\n");
+    assert!(cancelled.status.success(), "cancel failed: {:?}", cancelled);
+    let cancelled_text = String::from_utf8_lossy(&cancelled.stdout);
+    assert!(cancelled_text.contains("WARNING"));
+    assert!(cancelled_text.contains("cancelled"));
+    assert!(config_dir.exists());
+    assert!(data_dir.join("songs/1/image.jpg").exists());
+    assert!(cache_dir.exists());
+
+    let removed = run_cli_with_input(temp.path(), &["uninstall"], "yes\n");
+    assert!(removed.status.success(), "uninstall failed: {:?}", removed);
+    let removed_text = String::from_utf8_lossy(&removed.stdout);
+    assert!(removed_text.contains("user data removed"));
+    assert!(!config_dir.exists());
+    assert!(!data_dir.exists());
+    assert!(!cache_dir.exists());
 }

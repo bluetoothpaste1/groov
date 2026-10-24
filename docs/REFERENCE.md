@@ -18,6 +18,7 @@ groov [command] [arguments]
 |---|---|---|
 | `tui` | нет | открыть плеер |
 | `init` | нет | создать каталоги и default settings |
+| `uninstall` | нет | удалить конфигурацию, кэш и всю локальную библиотеку после подтверждения |
 | `paths` | нет | вывести XDG-пути |
 | `doctor` | нет | вывести диагностику |
 | `version` | нет | вывести версию |
@@ -68,6 +69,14 @@ groov list --json
 
 `--json` выводит normalized `SongInfo` с capitalized metadata keys.
 
+### `groov uninstall`
+
+```text
+groov uninstall
+```
+
+Команда показывает предупреждение и пути `config`, `data` и `cache`, затем ждёт `y` или `yes`. Любой другой ответ отменяет операцию. После подтверждения удаляются все эти каталоги целиком: настройки, модули, темы, кэш, аудиофайлы, обложки, lyrics и metadata. Исполняемый файл groov команда не удаляет.
+
 ### `groov modules`
 
 ```text
@@ -89,6 +98,18 @@ groov theme use NAME
 ```
 
 При установке имя берётся из top-level `name`, затем из filename stem. Допустимы ASCII-буквы, цифры, `-` и `_`.
+
+## TUI modes and commands
+
+The TUI has independent input and view states. `NORMAL` input navigates the full `NORMAL` view; `COMMAND` input is the temporary `:` prompt. The view command is:
+
+```text
+:mode
+:mode normal
+:mode compact
+```
+
+`:mode` reports the active view. `normal` restores the library, track details, timeline, and status layout. `compact` renders only the current track's cover and keeps playback controls active: `j/k` (or arrows) immediately start the next/previous visible track, `h/l` seek by `skip_seconds`, and `Space` toggles playback. `:follow on|off` controls whether the selected row follows tracks started by playback transitions; it is persisted in `settings.json` and defaults to off. The view mode itself is runtime state and is not persisted.
 
 ## Пути
 
@@ -126,6 +147,7 @@ themes_dir   = CONFIG_HOME/groov/themes
   "player_command": "ffplay -nodisp -autoexit -loglevel quiet {file}",
   "skip_seconds": 5,
   "repeat": false,
+  "follow_playback": false,
   "cover_size": 16,
   "themes": {},
   "modules": [],
@@ -148,6 +170,7 @@ themes_dir   = CONFIG_HOME/groov/themes
 | `player_command` | string | ffplay command | shell command audio backend |
 | `skip_seconds` | unsigned integer | `5` | шаг `h/l` |
 | `repeat` | boolean | `false` | повтор текущего трека |
+| `follow_playback` | boolean | `false` | перемещать выделение к начавшему играть треку |
 | `cover_size` | unsigned integer | `16` | ширина обложки в cell; TUI ограничивает 4–64 |
 | `themes` | object | `{}` | встроенные пользовательские палитры |
 | `modules` | array | `[]` | inline module configurations |

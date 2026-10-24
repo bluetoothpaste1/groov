@@ -41,6 +41,9 @@ pub struct Settings {
     pub skip_seconds: u64,
     #[serde(default)]
     pub repeat: bool,
+    /// Keep the selected library row aligned with the track that starts playing.
+    #[serde(default)]
+    pub follow_playback: bool,
     #[serde(default = "default_cover_size")]
     pub cover_size: u16,
     #[serde(default)]
@@ -162,6 +165,7 @@ impl Default for Settings {
             player_command: "ffplay -nodisp -autoexit -loglevel quiet {file}".into(),
             skip_seconds: 5,
             repeat: false,
+            follow_playback: false,
             cover_size: 16,
             modules: Vec::new(),
             themes: BTreeMap::new(),
@@ -463,6 +467,7 @@ mod tests {
         let json = serde_json::to_string(&Settings::default()).unwrap();
         assert!(json.contains("\"themes\""));
         assert!(json.contains("\"repeat\":false"));
+        assert!(json.contains("\"follow_playback\":false"));
     }
 
     #[test]
@@ -500,6 +505,7 @@ mod tests {
         .unwrap();
         let settings = load(&app_paths).unwrap();
         assert!(!settings.repeat);
+        assert!(!settings.follow_playback);
         assert!(settings.modules.is_empty());
         assert_eq!(settings.cover_size, 16);
     }
