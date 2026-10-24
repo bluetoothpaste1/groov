@@ -7,6 +7,7 @@ use std::thread;
 
 use crate::config::Settings;
 use crate::library::Song;
+use crate::paths::AppPaths;
 use serde_json::{json, Value};
 
 /// A JSONL response emitted by an RPC module. The TUI interprets the `type`
@@ -158,13 +159,15 @@ impl ModuleOutput {
 pub struct ModuleRuntime {
     sessions: Arc<Mutex<HashMap<String, Sender<Value>>>>,
     output: Sender<ModuleOutput>,
+    paths: AppPaths,
 }
 
 impl ModuleRuntime {
-    pub fn new(output: Sender<ModuleOutput>) -> Self {
+    pub fn new(paths: AppPaths, output: Sender<ModuleOutput>) -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             output,
+            paths,
         }
     }
 
@@ -184,7 +187,7 @@ impl ModuleRuntime {
             }
             let _ = self.send_session(module, rpc_request(event, &[], song));
         }
-        emit_with_output(settings, event, song, Some(&self.output));
+        emit_with_output(settings, event, song, Some(&self.output), Some(&self.paths));
     }
 
     pub fn dispatch_command(
@@ -213,7 +216,14 @@ impl ModuleRuntime {
             }
             break;
         }
-        dispatch_command_with_output(settings, command_name, args, song, Some(&self.output))
+        dispatch_command_with_output(
+            settings,
+            command_name,
+            args,
+            song,
+            Some(&self.output),
+            Some(&self.paths),
+        )
     }
 
     pub fn send_input(&self, settings: &Settings, module_name: &str, key: &str) -> bool {
@@ -264,7 +274,7 @@ impl ModuleRuntime {
                 .map_err(|_| "module session lock poisoned".to_string())?
                 .remove(&name);
         }
-        let sender = spawn_session(module, self.output.clone())
+        let sender = spawn_session(module, self.output.clone(), Some(&self.paths))
             .map_err(|error| format!("cannot start module {name}: {error}"))?;
         sender
             .send(request)
@@ -284,6 +294,7 @@ pub fn emit_with_output(
     event: &str,
     song: Option<&Song>,
     output: Option<&Sender<ModuleOutput>>,
+    paths: Option<&AppPaths>,
 ) {
     for module in settings.modules.iter().filter(|module| module.enabled) {
         let Some(command) = module.command.as_deref() else {
@@ -301,7 +312,15 @@ pub fn emit_with_output(
             if module.session {
                 continue;
             }
-            let _ = spawn_rpc(module, module.args.clone(), Vec::new(), event, song, output);
+            let _ = spawn_rpc(
+                module,
+                module.args.clone(),
+                Vec::new(),
+                event,
+                song,
+                output,
+                paths,
+            );
             continue;
         }
         let mut process = Command::new(command);
@@ -317,6 +336,7 @@ pub fn emit_with_output(
         process.env("GROOV_EVENT", event);
         process.env("GROOV_API_VERSION", "1");
         process.env("GROOV_EVENT_JSON", event_payload(event, song));
+        set_paths_env(&mut process, paths);
         process.stdin(Stdio::null());
         process.stdout(Stdio::null());
         process.stderr(Stdio::null());
@@ -340,6 +360,7 @@ pub fn dispatch_command_with_output(
     args: &[String],
     song: Option<&Song>,
     output: Option<&Sender<ModuleOutput>>,
+    paths: Option<&AppPaths>,
 ) -> Option<Result<String, String>> {
     for module in settings.modules.iter().filter(|module| module.enabled) {
         let Some(command) = module.command.as_deref() else {
@@ -371,6 +392,7 @@ pub fn dispatch_command_with_output(
                     &event,
                     song,
                     output,
+                    paths,
                 )
                 .map(|_| format!("module {}: {}", module.name, command_name))
                 .map_err(|error| format!("cannot start module {}: {error}", module.name)),
@@ -384,6 +406,7 @@ pub fn dispatch_command_with_output(
         process.env("GROOV_EVENT", &event);
         process.env("GROOV_API_VERSION", "1");
         process.env("GROOV_EVENT_JSON", event_payload(&event, song));
+        set_paths_env(&mut process, paths);
         process.stdin(Stdio::null());
         process.stdout(Stdio::null());
         process.stderr(Stdio::null());
@@ -414,6 +437,7 @@ fn module_accepts_event(module: &crate::config::ModuleConfig, event: &str) -> bo
 fn spawn_session(
     module: &crate::config::ModuleConfig,
     output: Sender<ModuleOutput>,
+    paths: Option<&AppPaths>,
 ) -> std::io::Result<Sender<Value>> {
     let command = module.command.as_deref().ok_or_else(|| {
         std::io::Error::new(
@@ -432,6 +456,7 @@ fn spawn_session(
         "GROOV_EVENT_JSON",
         "{\"type\":\"session\",\"api_version\":1}",
     );
+    set_paths_env(&mut process, paths);
     for (key, value) in &module.env {
         process.env(key, value);
     }
@@ -497,6 +522,7 @@ fn spawn_rpc(
     event: &str,
     song: Option<&Song>,
     output: Option<&Sender<ModuleOutput>>,
+    paths: Option<&AppPaths>,
 ) -> std::io::Result<()> {
     let command = module.command.as_deref().ok_or_else(|| {
         std::io::Error::new(
@@ -516,6 +542,7 @@ fn spawn_rpc(
     process.env("GROOV_API_VERSION", "1");
     process.env("GROOV_EVENT", event);
     process.env("GROOV_EVENT_JSON", event_payload(event, song));
+    set_paths_env(&mut process, paths);
     for (key, value) in &module.env {
         process.env(key, interpolate(value, event, song));
     }
@@ -568,6 +595,17 @@ fn spawn_rpc(
         let _ = child.wait();
     });
     Ok(())
+}
+
+fn set_paths_env(process: &mut Command, paths: Option<&AppPaths>) {
+    let Some(paths) = paths else {
+        return;
+    };
+    process.env("GROOV_CONFIG_DIR", &paths.config_dir);
+    process.env("GROOV_SETTINGS_FILE", &paths.settings_file);
+    process.env("GROOV_DATA_DIR", &paths.data_dir);
+    process.env("GROOV_SONGS_DIR", &paths.songs_dir);
+    process.env("GROOV_CACHE_DIR", &paths.cache_dir);
 }
 
 fn spawn_detached(mut process: Command) -> std::io::Result<()> {
@@ -655,6 +693,7 @@ mod tests {
             "command:test",
             None,
             Some(&tx),
+            None,
         )
         .unwrap();
         let output = rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -670,7 +709,7 @@ mod tests {
         )
         .unwrap();
         let (tx, rx) = mpsc::channel::<ModuleOutput>();
-        let session = spawn_session(&module, tx).unwrap();
+        let session = spawn_session(&module, tx, None).unwrap();
         session.send(serde_json::json!({"event":"one"})).unwrap();
         session.send(serde_json::json!({"event":"two"})).unwrap();
         assert_eq!(rx.recv_timeout(Duration::from_secs(2)).unwrap().text, "ok");

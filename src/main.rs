@@ -41,16 +41,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "paths" => println!("{}", paths.describe()),
         "doctor" => doctor(&paths)?,
         "theme" | "themes" => theme_command(&paths, args.collect())?,
-        "modules" => modules_command(&paths, args.collect())?,
+        "module" | "modules" => modules_command(&paths, args.collect())?,
         "list" => list(&paths, args.collect())?,
         "scan" => scan_command(&paths)?,
         "add" | "import" => add(&paths, args.collect())?,
         "edit" => edit(&paths, args.collect())?,
         "tui" => tui_command(&paths)?,
-        "tracks" => {
-            eprintln!("groov: VK support is preserved in the legacy C target; local library commands are now the default");
-            print_help();
-        }
         other => return Err(format!("unknown command '{other}' (try groov help)").into()),
     }
     Ok(())
@@ -74,7 +70,7 @@ fn print_help() {
     println!("  doctor                      show setup and player diagnostics");
     println!("  version                     print the groov version");
     println!("  theme list|install|use      list, install, or activate a color theme");
-    println!("  modules [on|off|info] NAME  list or manage installed modules");
+    println!("  modules [list|install|remove|enable|disable|info] ... manage modules");
     println!();
     println!(
         "TUI: j/k move, Enter plays, n/] next, [ prev, a enqueue, / search, : commands, q quits"
@@ -179,9 +175,14 @@ fn modules_command(paths: &AppPaths, args: Vec<String>) -> Result<(), Box<dyn st
                 }
             }
         }
-        Some(command) if command == "on" || command == "off" => {
+        Some(command)
+            if command == "on"
+                || command == "enable"
+                || command == "off"
+                || command == "disable" =>
+        {
             let name = args.get(1).ok_or("modules on/off requires a module name")?;
-            let enabled = command == "on";
+            let enabled = command == "on" || command == "enable";
             let Some(module) = settings
                 .modules
                 .iter_mut()
@@ -197,6 +198,8 @@ fn modules_command(paths: &AppPaths, args: Vec<String>) -> Result<(), Box<dyn st
                 if enabled { "on" } else { "off" }
             );
         }
+        Some("install") | Some("add") => install_module(paths, &args[1..])?,
+        Some("remove") | Some("rm") => remove_module(paths, &mut settings, &args[1..])?,
         Some("info") => {
             let name = args.get(1).ok_or("modules info requires a module name")?;
             let Some(module) = settings
@@ -220,8 +223,133 @@ fn modules_command(paths: &AppPaths, args: Vec<String>) -> Result<(), Box<dyn st
         }
         Some(command) => {
             return Err(
-                format!("unknown modules command '{command}' (use list, on, off, or info)").into(),
+                format!(
+                    "unknown modules command '{command}' (use list, install, remove, enable, disable, or info)"
+                )
+                .into(),
             )
+        }
+    }
+    Ok(())
+}
+
+fn install_module(paths: &AppPaths, args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let source_arg = args
+        .first()
+        .ok_or("modules install requires a module directory")?;
+    let force = args.iter().skip(1).any(|value| value == "--force");
+    if args.iter().skip(1).any(|value| value != "--force") {
+        return Err("usage: groov modules install DIRECTORY [--force]".into());
+    }
+    let source = Path::new(source_arg);
+    let source_dir = if source.is_dir() {
+        source.to_path_buf()
+    } else if source.file_name().and_then(|value| value.to_str()) == Some("module.json") {
+        source
+            .parent()
+            .ok_or("module manifest has no parent directory")?
+            .to_path_buf()
+    } else {
+        return Err(format!("module directory not found: {source_arg}").into());
+    };
+    let manifest_path = source_dir.join("module.json");
+    if !manifest_path.is_file() {
+        return Err(format!("module.json not found in {}", source_dir.display()).into());
+    }
+    let manifest_text = fs::read_to_string(&manifest_path)?;
+    let manifest: config::ModuleConfig = serde_json::from_str(&manifest_text)?;
+    let name = manifest.name.trim();
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+        return Err("module name must be a non-empty directory-safe value".into());
+    }
+    let destination_root = paths.config_dir.join("modules");
+    let destination = destination_root.join(name);
+    if source_dir
+        .canonicalize()
+        .ok()
+        .zip(destination.canonicalize().ok())
+        .is_some_and(|(source, destination)| source == destination)
+    {
+        return Err("module is already installed at that path".into());
+    }
+    if destination.exists() {
+        if !force {
+            return Err(format!(
+                "module '{name}' is already installed (use --force to replace it)"
+            )
+            .into());
+        }
+        fs::remove_dir_all(&destination)?;
+    }
+    fs::create_dir_all(&destination_root)?;
+    copy_module_tree(&source_dir, &destination)?;
+    println!("installed module {name} at {}", destination.display());
+    Ok(())
+}
+
+fn remove_module(
+    paths: &AppPaths,
+    settings: &mut Settings,
+    args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let name = args
+        .first()
+        .ok_or("modules remove requires a module name")?;
+    if args.len() != 1 {
+        return Err("usage: groov modules remove NAME".into());
+    }
+    let Some(module) = settings
+        .modules
+        .iter()
+        .find(|module| module.name.eq_ignore_ascii_case(name))
+    else {
+        return Err(format!("module not found: {name}").into());
+    };
+    let manifest_path = module.manifest_path.clone();
+    let removed = settings
+        .modules
+        .iter()
+        .filter(|module| module.name.eq_ignore_ascii_case(name))
+        .count();
+    settings
+        .modules
+        .retain(|module| !module.name.eq_ignore_ascii_case(name));
+    if let Some(manifest_path) = manifest_path {
+        let modules_root = paths.config_dir.join("modules");
+        if manifest_path.starts_with(&modules_root) {
+            if let Some(module_dir) = manifest_path.parent() {
+                if module_dir.is_dir() {
+                    fs::remove_dir_all(module_dir)?;
+                }
+            }
+        }
+    }
+    config::write_settings(paths, settings)?;
+    println!(
+        "removed module {name} ({removed} configuration entr{})",
+        if removed == 1 { "y" } else { "ies" }
+    );
+    Ok(())
+}
+
+fn copy_module_tree(source: &Path, destination: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            return Err(format!(
+                "module contains unsupported symlink: {}",
+                source_path.display()
+            )
+            .into());
+        }
+        if file_type.is_dir() {
+            copy_module_tree(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &destination_path)?;
         }
     }
     Ok(())

@@ -4,29 +4,82 @@
 
 Current release: `1.0.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes and [LICENSE](LICENSE) for the MIT license.
 
-Source installation:
+## Installation
+
+### Dependencies
+
+For a normal source build you need Rust/Cargo and FFmpeg for playback. Python 3 is only needed for the optional `basic_modules` examples.
+
+On Debian or Ubuntu:
 
 ```sh
-make release
-make install PREFIX="$HOME/.local"
+sudo apt update
+sudo apt install --yes ffmpeg python3
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+. "$HOME/.cargo/env"
 ```
 
-The project CI checks Rust on Linux and macOS, the legacy C target on Linux, documentation links, formatting, clippy, tests, and release builds.
+On macOS:
+
+```sh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+brew install ffmpeg python
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+. "$HOME/.cargo/env"
+```
+
+The Rust installer can be skipped when `rustc --version` and `cargo --version` already work. `ffprobe` is optional; when present, `groov add` reads embedded title, artist, album, and duration metadata.
+
+On macOS, install the small Command Line Tools package with `xcode-select --install` only if `cargo build` reports that the system linker or `cc` is missing; the full Xcode application is not required by groov.
+
+### Build and install
+
+You can install manually with `make` and `make install`, or use the repository installer. The script builds the release binary and installs it with the man page; it does not need root when using the default user prefix:
+
+```sh
+./install.sh
+```
+
+To install elsewhere:
+
+```sh
+PREFIX="$HOME/.local" ./install.sh
+```
+
+```sh
+git clone https://github.com/bluetoothpaste1/groov.git
+cd groov
+make
+make test
+make install PREFIX="$HOME/.local"
+export PATH="$HOME/.local/bin:$PATH"
+groov init
+groov
+```
+
+The install target and `install.sh` place the release binary in `$PREFIX/bin` and the man page in `$PREFIX/share/man/man1`. To remove those installed files, run `make uninstall PREFIX="$HOME/.local"`. To remove groov's user library, settings, modules, themes, and cache, run `groov uninstall` and confirm with `yes`.
+
+For a development checkout without installing:
+
+```sh
+make
+./target/debug/groov init
+./target/debug/groov
+```
+
+The project CI checks Rust on Linux and macOS, documentation links, formatting, clippy, tests, and release builds.
 
 Tagged builds use the `vX.Y.Z` convention. GitHub Actions packages Linux and macOS release archives with the architecture in the filename.
 
-The first implementation is written in Rust. The previous C VK experiment remains in `src/main.c` and `src/vk.c` and can still be built with `make legacy`; it is isolated from the local player.
+The application is implemented in Rust; audio playback and optional extensions remain separate external processes.
 
 ## Build and run
-
-Rust and Cargo are required. The default player command uses `ffplay` from FFmpeg, so install FFmpeg if audio playback is needed.
 
 ```sh
 make
 make test
 make docs-check
 make release
-./target/debug/groov init
 ./target/debug/groov add ~/Downloads/song.mp3
 ./target/debug/groov add ./keep-a-copy.mp3 --copy --tag archive
 ./target/debug/groov
@@ -71,8 +124,10 @@ In command mode, `Tab` completes command names, `set` fields, and paths for `ima
 
 Settings can enable external modules with `modules[].command`; they receive playback events through `GROOV_EVENT`, `GROOV_EVENT_JSON`, `GROOV_SONG_ID`, and `GROOV_SONG_FILE`. A module can expose command aliases (`commands`) and key bindings (`keys`), set environment variables (`env`), choose a working directory (`cwd`), enable JSONL RPC views (`rpc`), keep a streaming RPC process (`session`), and restrict events with `events`. RPC modules can return status, overlays, paragraphs, lists, gauges, declarative widget trees, input handling, and redraw messages to the TUI. Standalone modules are discovered from `~/.config/groov/modules/<name>/module.json` and use their manifest directory as the default working directory, so a module can be written in Rust, Python, Lua, shell, or any other language without changing groov. The module process contract is versioned with `GROOV_API_VERSION=1`.
 
-Manage modules from COMMAND mode with `:modules` or `:modules list`, `:modules on NAME`, `:modules off NAME`, and `:modules info NAME`. The module panel shows the manifest path, working directory, metadata, commands, key bindings, events, and environment. The same operations are available from the CLI as `groov modules`, `groov modules on NAME`, `groov modules off NAME`, and `groov modules info NAME`. A complete reference extension lives in [`examples/modules/hello`](examples/modules/hello).
+Manage modules from COMMAND mode with `:modules` or `:modules list`, `:modules on NAME`, `:modules off NAME`, and `:modules info NAME`. For installed extensions, use `groov modules install DIRECTORY` (or `groov module add DIRECTORY`), `groov modules remove NAME`, and `groov modules enable|disable NAME`. The module panel shows the manifest path, working directory, metadata, commands, key bindings, events, and environment. A complete reference extension lives in [`examples/modules/hello`](examples/modules/hello).
 
-Themes are built in (`monochrome`, `ocean`, `gruvbox`, `nord`, and `dracula`) and can be installed as JSON with `groov theme install theme.json`. Select one interactively with `:set theme ocean`; the choice is persisted in `settings.json`. Installed JSON files in `~/.config/groov/themes/<name>.json` are loaded automatically.
+The repository also includes independent, ready-to-copy extensions in [`basic_modules`](basic_modules): `flame` animates border colors and `easyadd` provides an interactive track-import form.
+
+Themes are built in (`monochrome`, `ocean`, `gruvbox`, `nord`, `dracula`, `solarized`, `catppuccin`, `tokyo-night`, and `transparent`). Select one with `groov theme use NAME` or `:set theme NAME`; the choice is persisted in `settings.json`. Write a custom JSON theme and place it in `~/.config/groov/themes/<name>.json`, or install it with `groov theme install theme.json`. Files are loaded automatically and can be activated after `:reload`. `transparent` uses the terminal's own background (`reset`) with light-gray text and thin lines.
 
 Полный справочник находится в [docs/README.md](docs/README.md): там есть [руководство пользователя](docs/USER_GUIDE.md), [guide по модулям](docs/MODULES.md), [справочник конфигурации](docs/REFERENCE.md), [руководство разработчика](docs/DEVELOPMENT.md) и [архитектурные решения](docs/ARCHITECTURE.md). Third-party software and attribution are listed in [CREDITS.md](CREDITS.md).

@@ -324,13 +324,26 @@ fn load_theme_files(paths: &AppPaths, settings: &mut Settings) -> Result<(), Con
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
-        let Some(name) = path.file_stem().and_then(|value| value.to_str()) else {
-            continue;
-        };
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
-        if let Ok(theme) = serde_json::from_str::<ThemeConfig>(&text) {
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let name = value
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                path.file_stem()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_owned)
+            });
+        let Some(name) = name else {
+            continue;
+        };
+        let theme_value = value.get("colors").cloned().unwrap_or(value);
+        if let Ok(theme) = serde_json::from_value::<ThemeConfig>(theme_value) {
             settings
                 .themes
                 .entry(name.to_ascii_lowercase())
@@ -341,12 +354,102 @@ fn load_theme_files(paths: &AppPaths, settings: &mut Settings) -> Result<(), Con
 }
 
 pub fn builtin_themes() -> &'static [&'static str] {
-    &["monochrome", "ocean", "gruvbox", "nord", "dracula"]
+    &[
+        "monochrome",
+        "ocean",
+        "gruvbox",
+        "nord",
+        "dracula",
+        "solarized",
+        "catppuccin",
+        "tokyo-night",
+        "transparent",
+    ]
+}
+
+pub fn builtin_theme(name: &str) -> Option<ThemeConfig> {
+    let theme = match name.to_ascii_lowercase().as_str() {
+        "monochrome" => ThemeConfig::default(),
+        "ocean" => ThemeConfig {
+            foreground: "#d7eaff".into(),
+            background: "#071827".into(),
+            accent: "#5fd7ff".into(),
+            muted: "#6f91a8".into(),
+            highlight: "#153b55".into(),
+            playing: "#7fffd4".into(),
+            border: "#2d6385".into(),
+        },
+        "gruvbox" => ThemeConfig {
+            foreground: "#ebdbb2".into(),
+            background: "#282828".into(),
+            accent: "#fabd2f".into(),
+            muted: "#928374".into(),
+            highlight: "#504945".into(),
+            playing: "#b8bb26".into(),
+            border: "#a89984".into(),
+        },
+        "nord" => ThemeConfig {
+            foreground: "#d8dee9".into(),
+            background: "#2e3440".into(),
+            accent: "#88c0d0".into(),
+            muted: "#81a1c1".into(),
+            highlight: "#434c5e".into(),
+            playing: "#a3be8c".into(),
+            border: "#5e81ac".into(),
+        },
+        "dracula" => ThemeConfig {
+            foreground: "#f8f8f2".into(),
+            background: "#282a36".into(),
+            accent: "#bd93f9".into(),
+            muted: "#6272a4".into(),
+            highlight: "#44475a".into(),
+            playing: "#50fa7b".into(),
+            border: "#8be9fd".into(),
+        },
+        "solarized" => ThemeConfig {
+            foreground: "#839496".into(),
+            background: "#002b36".into(),
+            accent: "#268bd2".into(),
+            muted: "#586e75".into(),
+            highlight: "#073642".into(),
+            playing: "#b58900".into(),
+            border: "#657b83".into(),
+        },
+        "catppuccin" => ThemeConfig {
+            foreground: "#cdd6f4".into(),
+            background: "#1e1e2e".into(),
+            accent: "#89b4fa".into(),
+            muted: "#7f849c".into(),
+            highlight: "#313244".into(),
+            playing: "#a6e3a1".into(),
+            border: "#585b70".into(),
+        },
+        "tokyo-night" => ThemeConfig {
+            foreground: "#c0caf5".into(),
+            background: "#1a1b26".into(),
+            accent: "#7aa2f7".into(),
+            muted: "#565f89".into(),
+            highlight: "#292e42".into(),
+            playing: "#9ece6a".into(),
+            border: "#3b4261".into(),
+        },
+        "transparent" => ThemeConfig {
+            foreground: "#d0d0d0".into(),
+            background: "reset".into(),
+            accent: "#e0e0e0".into(),
+            muted: "#a0a0a0".into(),
+            highlight: "reset".into(),
+            playing: "#d8d8d8".into(),
+            border: "#b8b8b8".into(),
+        },
+        _ => return None,
+    };
+    Some(theme)
 }
 
 pub fn theme_exists(settings: &Settings, name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    builtin_themes().contains(&name.as_str()) || settings.themes.contains_key(&name)
+    builtin_theme(&name).is_some() || settings.themes.contains_key(&name)
 }
 
 fn default_refresh_ms() -> u64 {
@@ -409,7 +512,7 @@ fn _path_exists(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{load, theme_exists, write_default, write_settings, Settings};
+    use super::{builtin_theme, load, theme_exists, write_default, write_settings, Settings};
     use crate::paths::AppPaths;
     use std::fs;
     use tempfile::tempdir;
@@ -433,8 +536,36 @@ mod tests {
         let mut settings = load(&app_paths).unwrap();
         settings.themes.insert("sunset".into(), Default::default());
         assert!(theme_exists(&settings, "GRUVBOX"));
+        assert!(theme_exists(&settings, "TRANSPARENT"));
+        assert_eq!(builtin_theme("transparent").unwrap().background, "reset");
         assert!(theme_exists(&settings, "sunset"));
         assert!(!theme_exists(&settings, "missing"));
+    }
+
+    #[test]
+    fn standalone_theme_files_support_name_and_colors_wrapper() {
+        let temp = tempdir().unwrap();
+        let app_paths = paths(temp.path());
+        let themes_dir = app_paths.config_dir.join("themes");
+        fs::create_dir_all(&themes_dir).unwrap();
+        fs::write(
+            themes_dir.join("custom.json"),
+            r##"{
+                "name": "sunset",
+                "colors": {
+                    "foreground": "#fff4e6",
+                    "background": "reset",
+                    "accent": "#ff9f43"
+                }
+            }"##,
+        )
+        .unwrap();
+
+        let settings = load(&app_paths).unwrap();
+        let theme = settings.themes.get("sunset").unwrap();
+        assert_eq!(theme.foreground, "#fff4e6");
+        assert_eq!(theme.background, "reset");
+        assert_eq!(theme.accent, "#ff9f43");
     }
 
     #[test]
@@ -491,6 +622,20 @@ mod tests {
         assert!(module.session);
         assert_eq!(module.commands[0].name, "dashboard");
         assert_eq!(module.keys.get("D").map(String::as_str), Some("dashboard"));
+    }
+
+    #[test]
+    fn basic_module_manifests_use_the_public_session_contract() {
+        let flame: super::ModuleConfig =
+            serde_json::from_str(include_str!("../basic_modules/flame/module.json")).unwrap();
+        let easyadd: super::ModuleConfig =
+            serde_json::from_str(include_str!("../basic_modules/easyadd/module.json")).unwrap();
+        assert!(flame.rpc && flame.session);
+        assert_eq!(flame.commands[0].name, "flame");
+        assert_eq!(flame.events, vec!["command:flame"]);
+        assert!(easyadd.rpc && easyadd.session);
+        assert_eq!(easyadd.commands[0].name, "easyadd");
+        assert_eq!(easyadd.events, vec!["command:easyadd"]);
     }
 
     #[test]

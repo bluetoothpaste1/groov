@@ -29,8 +29,8 @@ List songs. Use --tag and --json.
 .B scan
 Validate the local library.
 .TP
-.B modules [list|on|off|info]
-List and manage installed modules.
+.B modules [list|install|remove|enable|disable|info]
+Install and manage modules. The singular \fBmodule\fR alias is also accepted.
 .TP
 .B theme [list|install|use]
 List, install, and activate themes.
@@ -54,6 +54,6 @@ Module manifests.
 .I ~/.config/groov/themes
 Theme files.
 .SH ENVIRONMENT
-XDG_CONFIG_HOME, XDG_DATA_HOME, and XDG_CACHE_HOME override the default directories. Modules receive GROOV_API_VERSION, GROOV_EVENT, GROOV_EVENT_JSON, GROOV_SONG_ID, and GROOV_SONG_FILE.
+XDG_CONFIG_HOME, XDG_DATA_HOME, and XDG_CACHE_HOME override the default directories. Modules receive GROOV_API_VERSION, GROOV_EVENT, GROOV_EVENT_JSON, GROOV_SONG_ID, GROOV_SONG_FILE, GROOV_CONFIG_DIR, GROOV_SETTINGS_FILE, GROOV_DATA_DIR, GROOV_SONGS_DIR, and GROOV_CACHE_DIR.
 .SH SEE ALSO
 The installed documentation and https://github.com/bluetoothpaste1/groov

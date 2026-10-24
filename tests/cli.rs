@@ -96,6 +96,68 @@ fn cli_can_select_a_builtin_theme() {
 }
 
 #[test]
+fn cli_loads_and_selects_a_custom_theme_file() {
+    let temp = tempdir().unwrap();
+    let themes = temp.path().join("config/groov/themes");
+    fs::create_dir_all(&themes).unwrap();
+    fs::write(
+        themes.join("sunset.json"),
+        r##"{
+            "name": "sunset",
+            "colors": {
+                "foreground": "#fff4e6",
+                "background": "reset",
+                "accent": "#ff9f43",
+                "muted": "#b8a99a",
+                "highlight": "reset",
+                "playing": "#ffd166",
+                "border": "#d6c2b5"
+            }
+        }"##,
+    )
+    .unwrap();
+
+    let list = run_cli(temp.path(), &["theme", "list"]);
+    assert!(list.status.success(), "theme list failed: {:?}", list);
+    assert!(String::from_utf8_lossy(&list.stdout).contains("sunset"));
+
+    let use_theme = run_cli(temp.path(), &["theme", "use", "sunset"]);
+    assert!(
+        use_theme.status.success(),
+        "theme use failed: {:?}",
+        use_theme
+    );
+    let settings = fs::read_to_string(temp.path().join("config/groov/settings.json")).unwrap();
+    assert!(settings.contains("\"theme\": \"sunset\""));
+}
+
+#[test]
+fn cli_installs_enables_disables_and_removes_module() {
+    let temp = tempdir().unwrap();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("basic_modules/flame");
+    let source = source.to_string_lossy().into_owned();
+
+    let install = run_cli(temp.path(), &["module", "add", &source]);
+    assert!(install.status.success(), "install failed: {:?}", install);
+    let installed = temp.path().join("config/groov/modules/flame/module.json");
+    assert!(installed.is_file());
+
+    let enable = run_cli(temp.path(), &["modules", "enable", "flame"]);
+    assert!(enable.status.success(), "enable failed: {:?}", enable);
+    let settings = fs::read_to_string(temp.path().join("config/groov/settings.json")).unwrap();
+    assert!(settings.contains("\"enabled\": true"));
+
+    let disable = run_cli(temp.path(), &["modules", "disable", "flame"]);
+    assert!(disable.status.success(), "disable failed: {:?}", disable);
+    let settings = fs::read_to_string(temp.path().join("config/groov/settings.json")).unwrap();
+    assert!(settings.contains("\"enabled\": false"));
+
+    let remove = run_cli(temp.path(), &["modules", "remove", "flame"]);
+    assert!(remove.status.success(), "remove failed: {:?}", remove);
+    assert!(!installed.exists());
+}
+
+#[test]
 fn cli_reports_the_release_version() {
     let temp = tempdir().unwrap();
     let version = run_cli(temp.path(), &["--version"]);

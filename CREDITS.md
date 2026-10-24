@@ -10,6 +10,5 @@ groov does not copy source code from the projects below. It uses their published
 - [ratatui-image](https://github.com/ratatui/ratatui-image) for terminal image protocol detection and image widgets.
 - [Neovim's UI event protocol](https://github.com/neovim/neovim/blob/master/runtime/doc/api-ui-events.txt) as an architectural reference for grid-based redraws; no Neovim source code is copied.
 - [FFmpeg](https://ffmpeg.org/), specifically `ffplay`, as the default external audio player when installed.
-- The preserved VK experiment uses [libcurl](https://curl.se/libcurl/) and the VK API.
 
 Each dependency remains under its upstream license. See `Cargo.lock` and the dependency license files for exact versions and notices.

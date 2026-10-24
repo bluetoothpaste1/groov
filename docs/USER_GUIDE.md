@@ -17,11 +17,27 @@ groov — локальный музыкальный плеер для терми
 Для сборки нужны:
 
 - Rust и Cargo;
-- C-компилятор и libcurl только для сохранённой legacy VK-цели;
 - FFmpeg (`ffplay`) для воспроизведения;
 - FFmpeg (`ffprobe`) необязателен, но позволяет автоматически читать title, artist, album и duration.
 
-На macOS установите Xcode Command Line Tools и Rust. На Linux установите Rust системным способом или через rustup, затем установите FFmpeg из пакетов дистрибутива.
+На macOS:
+
+```sh
+brew install ffmpeg python
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+. "$HOME/.cargo/env"
+```
+
+На Debian или Ubuntu:
+
+```sh
+sudo apt update
+sudo apt install --yes ffmpeg python3
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+. "$HOME/.cargo/env"
+```
+
+Если `rustc --version` и `cargo --version` уже работают, установщик Rust повторно запускать не нужно. `ffprobe` необязателен, а Python 3 нужен только для примеров `basic_modules`. Если macOS сообщает об отсутствующем linker или `cc`, установите только Command Line Tools: `xcode-select --install`; полное приложение Xcode не требуется.
 
 Сборка:
 
@@ -37,18 +53,27 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-Legacy VK-эксперимент собирается отдельно:
-
-```sh
-make legacy
-build/groov-legacy --help
-```
-
 Для локальной установки release binary и man page:
 
 ```sh
 make release
 make install PREFIX="$HOME/.local"
+```
+
+То же самое можно сделать готовым скриптом из корня репозитория:
+
+```sh
+./install.sh
+# или
+PREFIX="$HOME/.local" ./install.sh
+```
+
+Скрипт собирает release binary и устанавливает man page без `sudo`, если используется пользовательский prefix.
+
+После установки добавьте `$HOME/.local/bin` в `PATH`, если его там ещё нет:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Удаление установленных файлов:
@@ -370,6 +395,17 @@ COMMAND отображается с префиксом `:`. Значения в 
 
 Для обычных env-модулей используйте examples/modules/hello. Для JSONL RPC и declarative UI views используйте examples/modules/rpc_dashboard.
 
+Для готовых независимых расширений используйте [`basic_modules`](../basic_modules/README.md):
+
+```sh
+groov modules install basic_modules/flame
+groov modules install basic_modules/easyadd
+groov modules enable flame
+groov modules enable easyadd
+```
+
+`groov module add DIRECTORY` — короткий алиас для `modules install`. Удаление выполняется через `groov modules remove NAME`, а временное выключение — через `groov modules disable NAME`; вернуть модуль можно командой `groov modules enable NAME`.
+
 ## Темы
 
 Встроенные темы:
@@ -380,6 +416,10 @@ ocean
 gruvbox
 nord
 dracula
+solarized
+catppuccin
+tokyo-night
+transparent
 ```
 
 Использование:
@@ -396,7 +436,28 @@ TUI-команда:
 :set theme ocean
 ```
 
-Пользовательская тема может быть отдельным файлом `$XDG_CONFIG_HOME/groov/themes/name.json` или объектом в `settings.json`. Формат описан в [REFERENCE.md](REFERENCE.md).
+Пользовательская тема может быть отдельным файлом `$XDG_CONFIG_HOME/groov/themes/name.json` или объектом в `settings.json`. После добавления файла перезапустите groov или выполните `:reload`, затем выберите имя через `groov theme use NAME` или `:set theme NAME`. Можно использовать как прямой объект цветов, так и оболочку `{ "name": "my-theme", "colors": { ... } }`. Формат описан в [REFERENCE.md](REFERENCE.md).
+
+Тема `transparent` использует `reset` для фона и выделения: терминал сохраняет собственный фон, а интерфейс рисует светло-серый текст, акценты и тонкие линии.
+
+Минимальная пользовательская тема:
+
+```json
+{
+  "name": "sunset",
+  "colors": {
+    "foreground": "#fff4e6",
+    "background": "reset",
+    "accent": "#ff9f43",
+    "muted": "#b8a99a",
+    "highlight": "reset",
+    "playing": "#ffd166",
+    "border": "#d6c2b5"
+  }
+}
+```
+
+Сохраните файл как `$XDG_CONFIG_HOME/groov/themes/sunset.json`, выполните `:reload` и выберите `:set theme sunset`.
 
 ## Обложки и терминалы
 

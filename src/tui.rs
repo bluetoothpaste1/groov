@@ -50,49 +50,9 @@ struct Palette {
 
 impl Palette {
     fn from_settings(settings: &Settings) -> Self {
-        let built_in = match settings.theme.to_ascii_lowercase().as_str() {
-            "ocean" => config::ThemeConfig {
-                foreground: "#d7eaff".into(),
-                background: "#071827".into(),
-                accent: "#5fd7ff".into(),
-                muted: "#6f91a8".into(),
-                highlight: "#153b55".into(),
-                playing: "#7fffd4".into(),
-                border: "#2d6385".into(),
-            },
-            "gruvbox" => config::ThemeConfig {
-                foreground: "#ebdbb2".into(),
-                background: "#282828".into(),
-                accent: "#fabd2f".into(),
-                muted: "#928374".into(),
-                highlight: "#504945".into(),
-                playing: "#b8bb26".into(),
-                border: "#a89984".into(),
-            },
-            "nord" => config::ThemeConfig {
-                foreground: "#d8dee9".into(),
-                background: "#2e3440".into(),
-                accent: "#88c0d0".into(),
-                muted: "#81a1c1".into(),
-                highlight: "#434c5e".into(),
-                playing: "#a3be8c".into(),
-                border: "#5e81ac".into(),
-            },
-            "dracula" => config::ThemeConfig {
-                foreground: "#f8f8f2".into(),
-                background: "#282a36".into(),
-                accent: "#bd93f9".into(),
-                muted: "#6272a4".into(),
-                highlight: "#44475a".into(),
-                playing: "#50fa7b".into(),
-                border: "#8be9fd".into(),
-            },
-            _ => config::ThemeConfig::default(),
-        };
-        let theme = settings
-            .themes
-            .get(&settings.theme.to_ascii_lowercase())
-            .unwrap_or(&built_in);
+        let name = settings.theme.to_ascii_lowercase();
+        let built_in = config::builtin_theme(&name).unwrap_or_default();
+        let theme = settings.themes.get(&name).unwrap_or(&built_in);
         Self {
             foreground: parse_color(&theme.foreground, Color::White),
             background: parse_color(&theme.background, Color::Reset),
@@ -156,13 +116,22 @@ struct App {
     module_outputs: Receiver<modules::ModuleOutput>,
     module_runtime: modules::ModuleRuntime,
     module_widget: Option<modules::ModuleWidgetNode>,
+    module_border: Option<Color>,
 }
 
 impl App {
+    fn palette(&self) -> Palette {
+        let mut palette = Palette::from_settings(&self.settings);
+        if let Some(border) = self.module_border {
+            palette.border = border;
+        }
+        palette
+    }
+
     fn new(paths: AppPaths, settings: Settings, songs: Vec<Song>) -> Self {
         let (image_requests, image_results) = spawn_image_worker();
         let (module_output_tx, module_outputs) = mpsc::channel();
-        let module_runtime = modules::ModuleRuntime::new(module_output_tx.clone());
+        let module_runtime = modules::ModuleRuntime::new(paths.clone(), module_output_tx.clone());
         let repeat = settings.repeat;
         let follow_playback = settings.follow_playback;
         let mut app = Self {
@@ -203,6 +172,7 @@ impl App {
             module_outputs,
             module_runtime,
             module_widget: None,
+            module_border: None,
         };
         app.refresh_visible();
         app
@@ -1043,6 +1013,7 @@ impl App {
                     self.repeat = settings.repeat;
                     self.follow_playback = settings.follow_playback;
                     self.settings = settings;
+                    self.module_border = None;
                     self.configure_image_picker();
                     self.status = "configuration and modules reloaded".into();
                 }
@@ -1569,6 +1540,34 @@ impl App {
                         })
                     });
                 }
+                "palette" => {
+                    if output
+                        .data
+                        .get("clear")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        self.module_border = None;
+                    } else if let Some(border) = output
+                        .data
+                        .get("border")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        self.module_border = Some(parse_color(border, Color::Gray));
+                    }
+                }
+                "close" => {
+                    self.module_info = None;
+                    self.module_widget = None;
+                }
+                "rescan" => match scan(&self.paths) {
+                    Ok(songs) => {
+                        self.songs = songs;
+                        self.refresh_visible();
+                        self.status = "library rescanned by module".into();
+                    }
+                    Err(error) => self.status = error.to_string(),
+                },
                 "redraw" => {}
                 _ => {
                     self.status = format!(
@@ -1586,7 +1585,7 @@ impl App {
             self.draw_compact(frame);
             return;
         }
-        let palette = Palette::from_settings(&self.settings);
+        let palette = self.palette();
         frame.render_widget(
             Block::default().style(Style::default().bg(palette.background)),
             frame.area(),
@@ -1741,7 +1740,7 @@ impl App {
     }
 
     fn draw_compact(&mut self, frame: &mut Frame<'_>) {
-        let palette = Palette::from_settings(&self.settings);
+        let palette = self.palette();
         let area = frame.area();
         frame.render_widget(
             Block::default().style(Style::default().bg(palette.background)),
@@ -1769,7 +1768,7 @@ impl App {
     }
 
     fn draw_details(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        let palette = Palette::from_settings(&self.settings);
+        let palette = self.palette();
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette.border))
@@ -2077,6 +2076,7 @@ fn key_name(key: &KeyEvent) -> String {
         KeyCode::Enter => "enter".into(),
         KeyCode::Esc => "escape".into(),
         KeyCode::Tab => "tab".into(),
+        KeyCode::Backspace => "backspace".into(),
         KeyCode::Up => "up".into(),
         KeyCode::Down => "down".into(),
         KeyCode::Left => "left".into(),
@@ -2464,6 +2464,7 @@ mod tests {
     use crate::config::Settings;
     use crate::library::{Song, SongInfo};
     use crate::paths::AppPaths;
+    use ratatui::style::Color;
     use std::fs;
     use tempfile::tempdir;
 
@@ -2491,6 +2492,18 @@ mod tests {
             previous_visible_queue_position(&[1, 2, 3], 2, &[1]),
             Some(0)
         );
+    }
+
+    #[test]
+    fn transparent_theme_preserves_terminal_background() {
+        let settings = Settings {
+            theme: "transparent".into(),
+            ..Settings::default()
+        };
+        let palette = super::Palette::from_settings(&settings);
+        assert_eq!(palette.background, Color::Reset);
+        assert_eq!(palette.highlight, Color::Reset);
+        assert_eq!(palette.foreground, Color::Rgb(0xd0, 0xd0, 0xd0));
     }
 
     #[test]
@@ -2710,5 +2723,41 @@ mod tests {
         assert!(app.receive_module_outputs());
         assert_eq!(app.module_widget.as_ref().unwrap().kind, "gauge");
         assert_eq!(app.module_widget.as_ref().unwrap().value, 5.0);
+
+        app.module_runtime
+            .output_sender()
+            .send(crate::modules::ModuleOutput {
+                module: "rpc".into(),
+                kind: "palette".into(),
+                title: String::new(),
+                text: String::new(),
+                lines: Vec::new(),
+                value: 0.0,
+                max: 0.0,
+                data: serde_json::json!({"type":"palette","border":"#ff9f43"}),
+                flush: true,
+                widget: None,
+            })
+            .unwrap();
+        assert!(app.receive_module_outputs());
+        assert_eq!(app.module_border, Some(Color::Rgb(0xff, 0x9f, 0x43)));
+
+        app.module_runtime
+            .output_sender()
+            .send(crate::modules::ModuleOutput {
+                module: "rpc".into(),
+                kind: "close".into(),
+                title: String::new(),
+                text: String::new(),
+                lines: Vec::new(),
+                value: 0.0,
+                max: 0.0,
+                data: serde_json::json!({"type":"close"}),
+                flush: true,
+                widget: None,
+            })
+            .unwrap();
+        assert!(app.receive_module_outputs());
+        assert!(app.module_widget.is_none());
     }
 }

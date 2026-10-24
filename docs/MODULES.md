@@ -11,7 +11,9 @@
 - использовать собственные environment variables;
 - работать из собственного каталога;
 - хранить любые дополнительные metadata;
-- отправлять JSONL RPC-ответы, из которых groov рендерит status, overlays, paragraphs, lists и gauges;
+- отправлять JSONL RPC-ответы, из которых groov рендерит status, overlays, paragraphs, lists, gauges и declarative widget trees;
+- открывать интерактивные session views, закрывать их и просить groov пересканировать библиотеку;
+- временно менять цвет границ через `palette` response;
 - включаться, выключаться и перечитываться без перезапуска groov.
 
 Это поведенческий plugin API. Модуль намеренно не загружается внутрь процесса groov и не получает прямой доступ к внутренним Rust-структурам. Процессная граница предотвращает падение TUI из-за ошибки расширения и позволяет сохранять совместимость между языками и версиями.
@@ -83,6 +85,8 @@ groov modules info hello
 Нажатие H в NORMAL mode вызывает ту же команду.
 
 Готовый минимальный пример находится в examples/modules/hello.
+
+Полноценные out-of-tree examples находятся в `basic_modules/`: `flame` демонстрирует streaming palette updates, а `easyadd` — interactive session view, input handling, atomic library writes и rescan request.
 
 ## Где groov ищет модули
 
@@ -257,9 +261,16 @@ GROOV_EVENT=play
 GROOV_EVENT_JSON={...}
 GROOV_SONG_ID=13
 GROOV_SONG_FILE=/path/to/song.mp3
+GROOV_CONFIG_DIR=/path/to/config/groov
+GROOV_SETTINGS_FILE=/path/to/config/groov/settings.json
+GROOV_DATA_DIR=/path/to/data/groov
+GROOV_SONGS_DIR=/path/to/data/groov/songs
+GROOV_CACHE_DIR=/path/to/cache/groov
 ~~~
 
 GROOV_SONG_ID и GROOV_SONG_FILE не устанавливаются, если song context отсутствует. GROOV_EVENT_JSON всегда содержит как минимум event.
+
+`GROOV_SONGS_DIR` предназначен для модулей, которые создают или обновляют записи библиотеки. Модуль должен писать временный каталог и переименовывать его в numeric song directory только после полной подготовки файлов.
 
 Для playback event:
 
@@ -345,6 +356,10 @@ RPC включается явно:
 | paragraph | text, title | текстовый widget |
 | list | lines, title | список строк |
 | gauge | value, max, text, title | progress gauge |
+| view | root или widget | declarative widget tree |
+| palette | border, clear | временно изменить цвет границ или очистить изменение |
+| close | нет | закрыть активный module view |
+| rescan | нет | перечитать библиотеку без остановки player |
 | redraw | нет | запросить новый render pass |
 
 Пример RPC-модуля:
@@ -369,7 +384,7 @@ for line in sys.stdin:
         }), flush=True)
 ~~~
 
-Неизвестные response types не ломают groov: они превращаются в диагностическое сообщение, а unknown fields сохраняются в parsed data. Это оставляет пространство для новых declarative widgets без поломки старого host.
+`palette` сейчас принимает цвет `border` в шестизначном hex или базовом имени; `clear: true` возвращает цвет из активной темы. Неизвестные response types не ломают groov: они превращаются в диагностическое сообщение, а unknown fields сохраняются в parsed data. Это оставляет пространство для новых declarative widgets без поломки старого host.
 
 При session: true процесс запускается один раз, принимает последовательность JSON requests и может отправлять streaming response lines. Request type input используется для передачи key events активному view. Session-модуль должен закрыть stdin и завершиться при остановке host.
 
@@ -470,12 +485,17 @@ cp target/release/my-groov-module ~/.local/bin/
 ~~~sh
 groov modules
 groov modules list
+groov modules install DIRECTORY
+groov module add DIRECTORY
+groov modules remove NAME
+groov modules enable NAME
+groov modules disable NAME
 groov modules on NAME
 groov modules off NAME
 groov modules info NAME
 ~~~
 
-on/off сохраняют module config в settings.json. Поэтому activation переживает перезапуск. :reload заново читает manifests и settings, не останавливая текущий player process.
+`install` и `add` копируют каталог с `module.json` в `$XDG_CONFIG_HOME/groov/modules/<name>`; `--force` заменяет существующую копию. `remove` удаляет установленную копию и запись из settings. `enable`/`disable` и `on`/`off` сохраняют activation в settings.json, поэтому состояние переживает перезапуск. `:reload` заново читает manifests и settings, не останавливая текущий player process.
 
 Info panel/command показывает:
 
@@ -551,4 +571,4 @@ GROOV_API_VERSION=1 — версия environment contract. Модуль долж
 
 ## Ограничения текущего API
 
-Модульный API расширяет команды, key bindings, process hooks и интеграции, а JSONL RPC уже позволяет возвращать декларативные status, overlay, paragraph, list и gauge views. Произвольный Rust Ratatui widget напрямую не загружается, а RPC-сессия сейчас request/response и запускает отдельный process на сообщение. Долгоживущие sessions, streaming notifications и custom widget schema можно добавить совместимо в следующей версии protocol; v1 оставляет для этого явные type/data границы.
+Модульный API расширяет команды, key bindings, process hooks и интеграции, а JSONL RPC позволяет возвращать декларативные views, palette updates, close и rescan messages. Произвольный Rust Ratatui widget напрямую не загружается: модуль владеет данными, а groov — terminal buffer и lifecycle. Долгоживущие sessions и streaming notifications уже поддерживаются через `session: true`; v1 оставляет для новых view types явные type/data границы.

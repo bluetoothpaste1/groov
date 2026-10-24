@@ -9,6 +9,7 @@
 - [Справочник конфигурации](REFERENCE.md) — точные поля `settings.json`, переменные окружения, форматы данных и CLI-команды.
 - [Руководство разработчика](DEVELOPMENT.md) — устройство исходников, сборка, тесты, изменение API и обязательные правила обновления документации.
 - [Архитектурные решения](ARCHITECTURE.md) — долговечные контракты хранения, расширений, рендера и выбора языка.
+- [`basic_modules`](../basic_modules/) — готовые out-of-tree примеры `flame` и `easyadd`.
 - [Changelog](../CHANGELOG.md) — история релизов и release notes.
 - [License](../LICENSE) — лицензия MIT.
 
@@ -19,12 +20,15 @@ groov init                         создать конфигурацию и к
 groov                              открыть TUI
 groov modules                      список модулей
 groov modules info NAME            подробности модуля
+groov modules install DIRECTORY    установить модуль
+groov modules remove NAME          удалить модуль
 groov theme list                   список тем
 groov doctor                       диагностика
 groov uninstall                    удалить все данные после подтверждения
 make docs-check                    проверить ссылки и code fences
 make release                       собрать release binary
 make install PREFIX=~/.local       установить binary и man page
+./install.sh                        собрать и установить release binary
 ```
 
 Для первого расширения используйте [тестовый модуль hello](../examples/modules/hello/README.md).

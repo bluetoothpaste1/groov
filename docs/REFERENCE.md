@@ -27,8 +27,7 @@ groov [command] [arguments]
 | `add` | `FILE` и опции импорта | импортировать аудио |
 | `edit` | `ID` и metadata-опции | изменить песню |
 | `theme` | `list`, `install FILE`, `use NAME` | управлять темами |
-| `modules` | `list`, `on NAME`, `off NAME`, `info NAME` | управлять модулями |
-| `tracks` | legacy-аргументы | показать сообщение о C VK target |
+| `modules` / `module` | `list`, `install DIRECTORY`, `remove NAME`, `enable NAME`, `disable NAME`, `info NAME` | устанавливать и управлять модулями |
 
 ### `groov add`
 
@@ -82,12 +81,17 @@ groov uninstall
 ```text
 groov modules
 groov modules list
+groov modules install DIRECTORY
+groov module add DIRECTORY
+groov modules remove NAME
+groov modules enable NAME
+groov modules disable NAME
 groov modules on NAME
 groov modules off NAME
 groov modules info NAME
 ```
 
-`on/off` записывают module entry в `settings.json`. `info` печатает source manifest path, working directory и serialized metadata.
+`install` и `add` копируют каталог с `module.json` в `$XDG_CONFIG_HOME/groov/modules/<name>`. `--force` заменяет уже установленный модуль. `remove` удаляет установленную копию и соответствующую запись из `settings.json`. `enable`/`disable` и их короткие алиасы `on`/`off` меняют поле `enabled`. `info` печатает source manifest path, working directory и serialized metadata.
 
 ### `groov theme`
 
@@ -199,6 +203,7 @@ themes_dir   = CONFIG_HOME/groov/themes
 
 ```text
 monochrome, ocean, gruvbox, nord, dracula
+solarized, catppuccin, tokyo-night, transparent
 ```
 
 Формат `ThemeConfig`:
@@ -217,6 +222,8 @@ monochrome, ocean, gruvbox, nord, dracula
 
 Допустимы шестизначные hex colors и базовые names: `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `gray`, `darkgray`, `reset`.
 
+`transparent` — встроенная тема с `reset` для `background` и `highlight`, поэтому фон терминала остаётся прозрачным для groov. Остальные встроенные темы задают собственный фон.
+
 Для удобства принимаются aliases:
 
 | Canonical | Aliases |
@@ -229,7 +236,7 @@ monochrome, ocean, gruvbox, nord, dracula
 | `playing` | `active` |
 | `border` | `line` |
 
-Тему можно разместить как `$XDG_CONFIG_HOME/groov/themes/name.json` или установить через CLI. Если одно имя есть и в settings, и в file, inline settings имеют приоритет.
+Тему можно разместить как `$XDG_CONFIG_HOME/groov/themes/name.json` или установить через CLI. Файл может быть прямым объектом `ThemeConfig` или оболочкой `{ "name": "my-theme", "colors": { ... } }`; в последнем случае имя берётся из поля `name`. Если одно имя есть и в settings, и в file, inline settings имеют приоритет. После добавления файла выполните `:reload` или перезапустите groov.
 
 ## Формат песни
 

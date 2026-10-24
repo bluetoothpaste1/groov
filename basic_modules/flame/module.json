@@ -1,0 +1,18 @@
+{
+  "name": "flame",
+  "version": "1.0.0",
+  "description": "Animated fire-colored TUI borders.",
+  "author": "groov contributors",
+  "enabled": false,
+  "rpc": true,
+  "session": true,
+  "command": "python3",
+  "args": ["flame.py"],
+  "events": ["command:flame"],
+  "commands": [
+    { "name": "flame", "args": [] }
+  ],
+  "keys": {
+    "f": "flame"
+  }
+}

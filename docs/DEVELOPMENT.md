@@ -22,14 +22,12 @@
 | src/player.rs | external audio process, placeholders, pause/stop |
 | src/modules.rs | event hooks, command aliases, environment contract |
 | src/tui.rs | app state, input dispatch, command parser, rendering, image worker |
-| src/main.c | legacy VK CLI |
-| src/vk.c | legacy VK transport/parser |
-| include/groov/vk.h | legacy VK public C API |
-| tests/test_vk.c | legacy C tests |
 | examples/modules/hello | reference extension |
+| basic_modules | independent flame and easyadd extension examples |
 | packaging/groov.1 | installed manual page |
+| install.sh | portable release installer for a user-selected prefix |
 | scripts/check_docs.py | dependency-free documentation check |
-| .github/workflows/ci.yml | Linux/macOS Rust and Linux legacy CI |
+| .github/workflows/ci.yml | Linux/macOS Rust CI |
 | .github/workflows/release.yml | tagged Linux/macOS binary artifacts |
 
 ## Архитектура приложения
@@ -139,14 +137,6 @@ make
 
 Debug executable: target/debug/groov.
 
-Legacy:
-
-~~~sh
-make legacy
-~~~
-
-Legacy target требует C compiler и libcurl. Rust target от него не зависит.
-
 Release binary and local installation:
 
 ~~~sh
@@ -188,7 +178,7 @@ groov modules off hello
 groov modules on hello
 ~~~
 
-GitHub Actions repeats the Rust checks on Ubuntu and macOS and builds/tests the legacy C target on Ubuntu. A pull request is not ready until these jobs are green.
+GitHub Actions repeats the Rust checks on Ubuntu and macOS. A pull request is not ready until these jobs are green.
 
 ## Тестирование
 
