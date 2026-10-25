@@ -485,7 +485,7 @@ TUI-команда:
 
 ```json
 {
-  "player_command": "mpv --no-video --no-terminal --audio-pitch-correction=yes --input-ipc-server={player_ipc} {file}"
+  "player_command": "mpv --no-video --no-terminal --audio-pitch-correction=yes --start={start} --input-ipc-server={player_ipc} {file}"
 }
 ```
 
@@ -496,7 +496,7 @@ TUI-команда:
 - `{audio_filter}` — отдельный аргумент `-af 'FILTER'` от playback-модулей или пустая строка;
 - `{player_ipc}` — путь к локальному IPC endpoint для backend с live-контролем.
 
-Если `{file}` отсутствует, groov добавит путь в конец команды. Для seek у стандартного `ffplay` groov автоматически добавляет `-ss`, если в команде нет `{start}`.
+Если `{file}` отсутствует, groov добавит путь в конец команды. Для seek groov автоматически добавляет `-ss` для `ffplay` или `--start` для `mpv`, если в команде нет `{start}`. Это сохраняет перемотку и для старых настроек mpv.
 
 stdout, stderr и stdin аудиобэкенда изолированы, чтобы backend не портил интерфейс. Для диагностики добавьте перенаправление прямо в `player_command`.
 

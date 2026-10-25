@@ -11,7 +11,7 @@ For fast, seamless live control, use mpv's IPC backend. mpv keeps one player pro
 
 ```json
 {
-  "player_command": "mpv --no-video --no-terminal --audio-pitch-correction=yes --input-ipc-server={player_ipc} {file}"
+  "player_command": "mpv --no-video --no-terminal --audio-pitch-correction=yes --start={start} --input-ipc-server={player_ipc} {file}"
 }
 ```
 

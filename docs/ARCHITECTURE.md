@@ -38,7 +38,7 @@ Paths in metadata are relative to the song directory. Missing `Lyrics` or `Image
   "refresh_ms": 100,
   "theme": "monochrome",
   "image_mode": "auto",
-  "player_command": "mpv --no-video --no-terminal --audio-pitch-correction=yes --input-ipc-server={player_ipc} {file}",
+  "player_command": "mpv --no-video --no-terminal --audio-pitch-correction=yes --start={start} --input-ipc-server={player_ipc} {file}",
   "skip_seconds": 5,
   "repeat": false,
   "follow_playback": false,

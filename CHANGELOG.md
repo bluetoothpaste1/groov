@@ -16,6 +16,7 @@ The first public release of the Rust-based local player.
 
 Use this section for changes after 1.0.0. Every behavior change must update the documentation and tests in the same change.
 
+- Fixed seek with the default mpv backend and preserved seek for legacy mpv settings without `{start}`.
 - Added runtime `:mode normal|compact` switching. Compact view renders only the current cover and maps `j/k` to immediate adjacent-track playback.
 - Added persisted `:follow on|off` selection tracking for automatic playback transitions.
 - Added `groov uninstall` with explicit confirmation before removing the complete local groov data set.

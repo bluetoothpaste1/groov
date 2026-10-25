@@ -148,7 +148,7 @@ themes_dir   = CONFIG_HOME/groov/themes
   "refresh_ms": 100,
   "theme": "monochrome",
   "image_mode": "auto",
-  "player_command": "mpv --no-video --no-terminal --audio-pitch-correction=yes --input-ipc-server={player_ipc} {file}",
+  "player_command": "mpv --no-video --no-terminal --audio-pitch-correction=yes --start={start} --input-ipc-server={player_ipc} {file}",
   "skip_seconds": 5,
   "repeat": false,
   "follow_playback": false,
@@ -282,7 +282,8 @@ ID каталога считается authoritative. Tags normalized to lowerca
 4. подставляет `{player_ipc}` путём локального IPC endpoint;
 5. если `{file}` отсутствует, добавляет quoted path в конец;
 6. если выполняется seek и команда содержит `ffplay`, а `{start}` отсутствует, добавляет `ffplay -ss N`;
-7. запускает команду с `exec`, чтобы signal pause/stop адресовался реальному player process.
+7. если выполняется seek и команда содержит `mpv`, а `{start}` отсутствует, добавляет `mpv --start=N`;
+8. запускает команду с `exec`, чтобы signal pause/stop адресовался реальному player process.
 
 Модули могут менять эти параметры через JSONL response `type: "playback"`; полный контракт и список действий находятся в [MODULES.md](MODULES.md). Если `{audio_filter}` не указан, непустой фильтр автоматически добавляется как `-af` только для команд, содержащих `ffplay`; другие backend-команды должны явно предоставить placeholder отдельным аргументом.
 

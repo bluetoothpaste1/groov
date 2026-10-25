@@ -243,6 +243,8 @@ pub fn ensure(paths: &AppPaths) -> Result<Settings, ConfigError> {
 }
 
 const MPV_PLAYER_COMMAND: &str =
+    "mpv --no-video --no-terminal --audio-pitch-correction=yes --start={start} --input-ipc-server={player_ipc} {file}";
+const LEGACY_MPV_PLAYER_COMMAND: &str =
     "mpv --no-video --no-terminal --audio-pitch-correction=yes --input-ipc-server={player_ipc} {file}";
 const FFPLAY_PLAYER_COMMAND: &str = "ffplay -nodisp -autoexit -loglevel quiet {file}";
 
@@ -255,9 +257,15 @@ fn preferred_player_command() -> String {
 }
 
 fn normalize_player_command(settings: &mut Settings) {
-    if settings.player_command == MPV_PLAYER_COMMAND && !executable_available("mpv") {
+    if (settings.player_command == MPV_PLAYER_COMMAND
+        || settings.player_command == LEGACY_MPV_PLAYER_COMMAND)
+        && !executable_available("mpv")
+    {
         settings.player_command = FFPLAY_PLAYER_COMMAND.into();
-    } else if settings.player_command == FFPLAY_PLAYER_COMMAND && executable_available("mpv") {
+    } else if (settings.player_command == LEGACY_MPV_PLAYER_COMMAND
+        || settings.player_command == FFPLAY_PLAYER_COMMAND)
+        && executable_available("mpv")
+    {
         settings.player_command = MPV_PLAYER_COMMAND.into();
     }
 }
@@ -638,6 +646,7 @@ mod tests {
     #[test]
     fn default_player_template_supports_live_backend_control() {
         assert!(Settings::default().player_command.contains("{player_ipc}"));
+        assert!(Settings::default().player_command.contains("{start}"));
     }
 
     #[test]

@@ -16,9 +16,14 @@ pub fn start_with_filter_and_control(
     let quoted = shell_quote(&audio.to_string_lossy());
     let start = start_seconds.to_string();
     let mut player_command = settings.player_command.clone();
-    if start_seconds > 0 && !player_command.contains("{start}") && player_command.contains("ffplay")
-    {
-        player_command = player_command.replacen("ffplay", &format!("ffplay -ss {start}"), 1);
+    if start_seconds > 0 && !player_command.contains("{start}") {
+        if player_command.contains("ffplay") {
+            player_command = player_command.replacen("ffplay", &format!("ffplay -ss {start}"), 1);
+        } else if player_command.contains("mpv") {
+            // Older generated settings used the live mpv command without a
+            // start placeholder. Keep those settings seekable as well.
+            player_command = player_command.replacen("mpv", &format!("mpv --start={start}"), 1);
+        }
     }
     if player_ipc.is_some()
         && player_command.contains("mpv")
@@ -208,5 +213,24 @@ mod tests {
             start_with_filter_and_control(&settings, &audio, 0, None, Some(&ipc)).unwrap();
         assert!(child.wait().unwrap().success());
         assert_eq!(fs::read_to_string(marker).unwrap(), ipc.to_string_lossy());
+    }
+
+    #[test]
+    fn legacy_mpv_command_receives_seek_offset_without_placeholder() {
+        let temp = tempdir().unwrap();
+        let audio = temp.path().join("track.mp3");
+        fs::write(&audio, b"test").unwrap();
+        let marker = temp.path().join("command.txt");
+        let settings = Settings {
+            player_command: format!(
+                "printf '%s' \"mpv {{file}}\" > {} && test -f {{file}}",
+                marker.display()
+            ),
+            ..Settings::default()
+        };
+        let mut child = start_with_filter_and_control(&settings, &audio, 7, None, None).unwrap();
+        assert!(child.wait().unwrap().success());
+        let command = fs::read_to_string(marker).unwrap();
+        assert!(command.contains("--start=7"), "rendered command: {command}");
     }
 }
