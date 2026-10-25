@@ -533,6 +533,19 @@ impl ModuleRuntime {
     }
 
     pub fn send_input(&self, settings: &Settings, module_name: &str, key: &str) -> bool {
+        self.send_input_event(
+            settings,
+            module_name,
+            json!({
+                "api_version": 1,
+                "type": "input",
+                "event": "key",
+                "key": key
+            }),
+        )
+    }
+
+    pub fn send_input_event(&self, settings: &Settings, module_name: &str, request: Value) -> bool {
         let Some(module) = settings.modules.iter().find(|module| {
             module.enabled
                 && module.rpc
@@ -541,16 +554,35 @@ impl ModuleRuntime {
         }) else {
             return false;
         };
-        self.send_session(
-            module,
-            json!({
-                "api_version": 1,
-                "type": "input",
-                "event": "key",
-                "key": key
-            }),
-        )
-        .is_ok()
+        self.send_session(module, request).is_ok()
+    }
+
+    pub fn resize(&self, settings: &Settings, width: u16, height: u16) {
+        let request = json!({
+            "api_version": 1,
+            "type": "resize",
+            "event": "resize",
+            "width": width,
+            "height": height
+        });
+        let active = self
+            .sessions
+            .lock()
+            .ok()
+            .map(|sessions| {
+                sessions
+                    .iter()
+                    .map(|(name, sender)| (name.clone(), sender.clone()))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+        for module in settings.modules.iter().filter(|module| {
+            module.enabled && module.rpc && module.session && active.contains_key(&module.name)
+        }) {
+            if let Some(sender) = active.get(&module.name) {
+                let _ = sender.send(request.clone());
+            }
+        }
     }
 
     pub fn reset(&self) {
@@ -560,6 +592,32 @@ impl ModuleRuntime {
         if let Ok(mut ticks) = self.last_ticks.lock() {
             ticks.clear();
         }
+    }
+
+    pub fn shutdown(&self, settings: &Settings) {
+        let active = self
+            .sessions
+            .lock()
+            .ok()
+            .map(|sessions| {
+                sessions
+                    .iter()
+                    .map(|(name, sender)| (name.clone(), sender.clone()))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+        for module in settings.modules.iter().filter(|module| {
+            module.enabled && module.rpc && module.session && active.contains_key(&module.name)
+        }) {
+            if let Some(sender) = active.get(&module.name) {
+                let _ = sender.send(json!({
+                    "api_version": 1,
+                    "type": "shutdown",
+                    "event": "shutdown"
+                }));
+            }
+        }
+        self.reset();
     }
 
     fn send_session(

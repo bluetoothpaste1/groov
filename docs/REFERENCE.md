@@ -168,7 +168,7 @@ themes_dir   = CONFIG_HOME/groov/themes
 
 | Поле | Тип | Default | Описание |
 |---|---|---|---|
-| `refresh_ms` | unsigned integer | `100` | интервал опроса событий; фактически не меньше 50 ms |
+| `refresh_ms` | unsigned integer | `100` | базовый интервал опроса событий; для active animation/tick host использует собственный deadline |
 | `theme` | string | `monochrome` | активная тема |
 | `image_mode` | string | `auto` | `auto`, `ansi`, `sixel`, `kitty`, `iterm2`, `none` |
 | `player_command` | string | mpv live command when available, otherwise ffplay | shell command audio backend |
@@ -306,6 +306,8 @@ stdin, stdout и stderr процесса изолированы. Пауза/пр
 Если module field `rpc` равен true, stdin/stdout используются JSONL protocol. При `session: true` один process принимает последовательность requests, включая input/key messages; request/response schema и declarative widgets описаны в [MODULES.md](MODULES.md).
 
 RPC response `type: "canvas"` рисует cell-based слой поверх host UI. `canvas_patch` обновляет только named commands, а `animation` передаёт host таблицу кадров для локального frame loop. Полный список операций и примеры находятся в [MODULES.md](MODULES.md). Manifest field `terminal: true` передаёт указанный command alias отдельному процессу с inherited stdin/stdout/stderr, чтобы модуль мог запустить собственный Ratatui/crossterm UI; `fps` включает host `tick` requests для session-модулей.
+
+Session requests `resize`, `tick`, `input` с `event: "mouse"` и `shutdown` описаны в [MODULES.md](MODULES.md). Mouse capture включается только для manifest с `mouse: true`.
 
 `GROOV_EVENT_JSON` сейчас содержит:
 

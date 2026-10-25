@@ -23,6 +23,17 @@
 
 Это поведенческий plugin API. Модуль намеренно не загружается внутрь процесса groov и не получает прямой доступ к внутренним Rust-структурам. Процессная граница предотвращает падение TUI из-за ошибки расширения и позволяет сохранять совместимость между языками и версиями.
 
+## Какой режим выбрать
+
+| Режим | Manifest | Возможности |
+|---|---|---|
+| Event hook | `rpc: false` | playback/metadata events, environment, любые внешние действия |
+| RPC command | `rpc: true`, `session: false` | один request → responses: status, view, canvas, animation, playback |
+| RPC session | `rpc: true`, `session: true` | постоянный процесс, key/mouse/resize/shutdown input, host ticks и streaming responses |
+| Direct terminal | `terminal: true` | собственный stdin/stdout/stderr, Ratatui/crossterm, mouse, alternate screen и полный lifecycle |
+
+Таким образом, модулю с HUD или overlay не нужен прямой доступ к Rust, а модулю с самостоятельным приложением не нужно подстраиваться под layout groov: используйте `terminal: true`.
+
 ## Быстрый старт
 
 Создайте каталог:
@@ -121,6 +132,7 @@ $XDG_CONFIG_HOME/groov/modules/<module-name>/module.json
   "session": true,
   "terminal": false,
   "fps": 0,
+  "mouse": false,
   "command": "python3",
   "args": ["main.py", "{event}", "{id}"],
   "events": ["play", "stop", "metadata"],
@@ -154,6 +166,7 @@ $XDG_CONFIG_HOME/groov/modules/<module-name>/module.json
 | session | boolean | false | держать RPC process живым между сообщениями |
 | terminal | boolean | false | передавать терминал отдельному command alias до его завершения |
 | fps | unsigned integer | `0` | частота host `tick` requests для session-модуля; диапазон 1..240 |
+| mouse | boolean | false | включить mouse capture для session-модуля и получать structured mouse input |
 | command | string или null | null | executable, который запускается |
 | args | array<string> | [] | аргументы event hook |
 | events | array<string> | [] | фильтр событий; пустой список означает все |
@@ -257,6 +270,7 @@ keys связывает имя клавиши с command line:
 | stop | пользователь остановил воспроизведение | обычно есть |
 | rescan | библиотека пересканирована | нет |
 | metadata | изменены metadata песни | есть |
+| tick | host frame request для session с `fps` | нет |
 
 events: [] означает получать все текущие и будущие события, которые groov отправляет через этот API. Чтобы уменьшить coupling, production-модуль лучше перечисляет нужные события явно.
 
@@ -276,6 +290,7 @@ GROOV_DATA_DIR=/path/to/data/groov
 GROOV_SONGS_DIR=/path/to/data/groov/songs
 GROOV_CACHE_DIR=/path/to/cache/groov
 GROOV_PLAYER_IPC=/path/to/cache/groov/player.sock
+GROOV_TERMINAL=1  # только для alias с terminal: true
 ~~~
 
 GROOV_SONG_ID и GROOV_SONG_FILE не устанавливаются, если song context отсутствует. GROOV_EVENT_JSON всегда содержит как минимум event.
@@ -400,7 +415,7 @@ for line in sys.stdin:
 
 `palette` сейчас принимает цвет `border` в шестизначном hex или базовом имени; `clear: true` возвращает цвет из активной темы. Неизвестные response types не ломают groov: они превращаются в диагностическое сообщение, а unknown fields сохраняются в parsed data. Это оставляет пространство для новых declarative widgets без поломки старого host.
 
-При session: true процесс запускается один раз, принимает последовательность JSON requests и может отправлять streaming response lines. Request type input используется для передачи key events активному view. Session-модуль должен закрыть stdin и завершиться при остановке host.
+При session: true процесс запускается один раз, принимает последовательность JSON requests и может отправлять streaming response lines. Request type `input` используется для передачи key events активному view; при `mouse: true` он также получает structured mouse requests. `resize` сообщает новый размер terminal, `tick` приходит с частотой из manifest `fps`, а `shutdown` отправляется перед `:reload` и выходом. Session-модуль должен завершиться после закрытия stdin или обработки shutdown.
 
 В открытом module view host сохраняет общую модель ввода: `:` переключает TUI в COMMAND mode, а `:q`/`:close` закрывает view. `Esc` остаётся коротким отменяющим жестом. Модуль получает остальные клавиши через обычный `input` request и не обязан резервировать собственные варианты выхода.
 
@@ -543,6 +558,33 @@ Session-модуль может указать в manifest `"fps": 60`. Host б�
 ~~~
 
 Модуль может использовать tick для физики, сетевых данных и интерактивных эффектов, а затем отправлять `canvas_patch`. `animation` предпочтительнее для заранее известных кадров: в этом случае между host и модулем нет JSONL round-trip на каждый кадр. Tick requests учитывают `events`; если events перечислены, добавьте `"tick"` или оставьте массив пустым.
+
+### Resize и mouse input
+
+Resize request имеет форму:
+
+~~~json
+{"api_version":1,"type":"resize","event":"resize","width":120,"height":40}
+~~~
+
+При `mouse: true` host включает mouse capture только для текущей TUI-сессии и отправляет modal canvas-модулю:
+
+~~~json
+{
+  "api_version": 1,
+  "type": "input",
+  "event": "mouse",
+  "mouse": {
+    "kind": "down",
+    "button": "left",
+    "x": 12,
+    "y": 4,
+    "modifiers": {"shift": false, "control": false, "alt": false}
+  }
+}
+~~~
+
+`kind` может быть `down`, `up`, `drag`, `move`, `scroll_up`, `scroll_down`, `scroll_left` или `scroll_right`. Координаты абсолютны относительно terminal; module сам сопоставляет их со своим `rect`.
 
 ## Примеры реализации
 

@@ -68,7 +68,7 @@ event loop:
 6. запускает следующий или повторный трек;
 7. обновляет timeline.
 
-Ratatui использует buffered diff renderer. Worker изображений получает generation number, поэтому устаревшая обложка не может перезаписать новую selection.
+При наличии host-driven animation или session `fps` event loop дополнительно просыпается по ближайшему frame/tick deadline. Mouse events передаются только при opt-in `mouse: true`, а session lifecycle завершается через `shutdown` перед reload и выходом. Ratatui использует buffered diff renderer. Worker изображений получает generation number, поэтому устаревшая обложка не может перезаписать новую selection.
 
 ## Как менять код
 

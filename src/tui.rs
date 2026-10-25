@@ -7,7 +7,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
@@ -271,8 +274,14 @@ impl App {
 
     fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let mut stdout = io::stdout();
+        let capture_mouse = self.mouse_capture_enabled();
         terminal::enable_raw_mode()?;
-        if let Err(error) = execute!(stdout, EnterAlternateScreen, Hide) {
+        let enter = if capture_mouse {
+            execute!(stdout, EnterAlternateScreen, Hide, EnableMouseCapture)
+        } else {
+            execute!(stdout, EnterAlternateScreen, Hide)
+        };
+        if let Err(error) = enter {
             let _ = terminal::disable_raw_mode();
             return Err(error.into());
         }
@@ -282,21 +291,48 @@ impl App {
             Ok(terminal) => terminal,
             Err(error) => {
                 let mut cleanup_stdout = io::stdout();
-                let _ = execute!(cleanup_stdout, Show, LeaveAlternateScreen);
+                if capture_mouse {
+                    let _ = execute!(
+                        cleanup_stdout,
+                        Show,
+                        DisableMouseCapture,
+                        LeaveAlternateScreen
+                    );
+                } else {
+                    let _ = execute!(cleanup_stdout, Show, LeaveAlternateScreen);
+                }
                 let _ = terminal::disable_raw_mode();
                 return Err(error.into());
             }
         };
         let result = self.event_loop(&mut terminal);
+        self.module_runtime.shutdown(&self.settings);
         player::stop(&mut self.player);
         player::clear_control_endpoint(&self.paths.player_ipc_path());
         let cursor_error = terminal.show_cursor().err();
-        let screen_error = execute!(terminal.backend_mut(), Show, LeaveAlternateScreen).err();
+        let screen_error = if capture_mouse {
+            execute!(
+                terminal.backend_mut(),
+                Show,
+                DisableMouseCapture,
+                LeaveAlternateScreen
+            )
+            .err()
+        } else {
+            execute!(terminal.backend_mut(), Show, LeaveAlternateScreen).err()
+        };
         let raw_error = terminal::disable_raw_mode().err();
         if let Some(error) = cursor_error.or(screen_error).or(raw_error) {
             return Err(error.into());
         }
         result
+    }
+
+    fn mouse_capture_enabled(&self) -> bool {
+        self.settings
+            .modules
+            .iter()
+            .any(|module| module.enabled && module.rpc && module.session && module.mouse)
     }
 
     fn event_loop(
@@ -333,7 +369,12 @@ impl App {
                         }
                         dirty = true;
                     }
-                    Event::Resize(_, _) => dirty = true,
+                    Event::Resize(width, height) => {
+                        self.module_runtime.resize(&self.settings, width, height);
+                        dirty = true;
+                    }
+                    Event::Mouse(mouse) if self.handle_mouse(mouse) => dirty = true,
+                    Event::Mouse(_) => {}
                     _ => {}
                 }
             }
@@ -567,6 +608,33 @@ impl App {
             InputMode::Normal => self.handle_normal(key),
             InputMode::Command => self.handle_input(key),
         }
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
+        let module_name = self
+            .active_modal_canvas()
+            .map(|(module_name, _)| module_name)
+            .or_else(|| {
+                self.module_widget
+                    .as_ref()
+                    .map(|widget| widget.module.clone())
+            });
+        let Some(module_name) = module_name else {
+            return false;
+        };
+        let request = serde_json::json!({
+            "api_version": 1,
+            "type": "input",
+            "event": "mouse",
+            "mouse": mouse_request(&mouse)
+        });
+        if !self
+            .module_runtime
+            .send_input_event(&self.settings, &module_name, request)
+        {
+            self.close_modal_canvas(&module_name);
+        }
+        true
     }
 
     fn close_module_view(&mut self) {
@@ -1309,7 +1377,7 @@ impl App {
             "reload" => match config::load(&self.paths) {
                 Ok(settings) => {
                     self.close_module_view();
-                    self.module_runtime.reset();
+                    self.module_runtime.shutdown(&self.settings);
                     self.repeat = settings.repeat;
                     self.follow_playback = settings.follow_playback;
                     self.settings = settings;
@@ -3135,6 +3203,38 @@ fn key_name(key: &KeyEvent) -> String {
         format!("alt-{base}")
     } else {
         base
+    }
+}
+
+fn mouse_request(mouse: &MouseEvent) -> serde_json::Value {
+    let (kind, button) = match mouse.kind {
+        MouseEventKind::Down(button) => ("down", Some(mouse_button_name(button))),
+        MouseEventKind::Up(button) => ("up", Some(mouse_button_name(button))),
+        MouseEventKind::Drag(button) => ("drag", Some(mouse_button_name(button))),
+        MouseEventKind::Moved => ("move", None),
+        MouseEventKind::ScrollDown => ("scroll_down", None),
+        MouseEventKind::ScrollUp => ("scroll_up", None),
+        MouseEventKind::ScrollLeft => ("scroll_left", None),
+        MouseEventKind::ScrollRight => ("scroll_right", None),
+    };
+    serde_json::json!({
+        "kind": kind,
+        "button": button,
+        "x": mouse.column,
+        "y": mouse.row,
+        "modifiers": {
+            "shift": mouse.modifiers.contains(KeyModifiers::SHIFT),
+            "control": mouse.modifiers.contains(KeyModifiers::CONTROL),
+            "alt": mouse.modifiers.contains(KeyModifiers::ALT)
+        }
+    })
+}
+
+fn mouse_button_name(button: MouseButton) -> &'static str {
+    match button {
+        MouseButton::Left => "left",
+        MouseButton::Right => "right",
+        MouseButton::Middle => "middle",
     }
 }
 

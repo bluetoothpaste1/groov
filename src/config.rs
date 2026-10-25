@@ -84,6 +84,9 @@ pub struct ModuleConfig {
     /// Request host-driven frame ticks for an RPC session (1..240 FPS).
     #[serde(default)]
     pub fps: u16,
+    /// Enable mouse capture and structured mouse input for this RPC session.
+    #[serde(default)]
+    pub mouse: bool,
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
@@ -331,6 +334,9 @@ fn load_module_manifests(paths: &AppPaths, settings: &mut Settings) -> Result<()
             }
             if existing.fps == 0 {
                 existing.fps = module.fps;
+            }
+            if !existing.mouse {
+                existing.mouse = module.mouse;
             }
             if existing.version.is_empty() {
                 existing.version = module.version;
