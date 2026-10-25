@@ -130,14 +130,39 @@ def send_mpv(commands):
     for attempt in range(3):
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-                connection.settimeout(0.15)
+                connection.settimeout(0.8)
                 connection.connect(PLAYER_IPC)
-                for command in commands:
+                pending = set(range(len(commands)))
+                for request_id, command in enumerate(commands):
                     connection.sendall(
-                        (json.dumps({"command": command}, separators=(",", ":")) + "\n").encode()
+                        (
+                            json.dumps(
+                                {"command": command, "request_id": request_id},
+                                separators=(",", ":"),
+                            )
+                            + "\n"
+                        ).encode()
                     )
-            return True
-        except OSError:
+                deadline = time.monotonic() + 0.8
+                buffer = ""
+                while pending and time.monotonic() < deadline:
+                    connection.settimeout(max(0.01, deadline - time.monotonic()))
+                    buffer += connection.recv(4096).decode()
+                    lines = buffer.split("\n")
+                    buffer = lines.pop()
+                    for line in lines:
+                        if not line.strip():
+                            continue
+                        response = json.loads(line)
+                        request_id = response.get("request_id")
+                        if request_id not in pending:
+                            continue
+                        if response.get("error") != "success":
+                            raise OSError(response.get("error", "mpv command failed"))
+                        pending.remove(request_id)
+                if not pending:
+                    return True
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             if attempt < 2:
                 time.sleep(0.05)
     return False

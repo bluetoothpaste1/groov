@@ -1,4 +1,8 @@
 import json
+import os
+import socket
+import tempfile
+import threading
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -81,6 +85,33 @@ class SpeedrTests(unittest.TestCase):
         self.assertEqual(commands[1][0:2], ["set_property", "speed"])
         self.assertEqual(commands[2][0:2], ["set_property", "pitch"])
         self.assertTrue(any(command[0:2] == ["af", "add"] for command in commands))
+
+    def test_ipc_commands_wait_for_backend_acknowledgements(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "player.sock")
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(path)
+            server.listen(1)
+
+            def acknowledge():
+                connection, _ = server.accept()
+                with connection:
+                    for line in connection.makefile():
+                        request = json.loads(line)
+                        connection.sendall(
+                            (
+                                json.dumps(
+                                    {"request_id": request["request_id"], "error": "success"}
+                                )
+                                + "\n"
+                            ).encode()
+                        )
+
+            thread = threading.Thread(target=acknowledge, daemon=True)
+            thread.start()
+            with patch.object(speedr, "PLAYER_IPC", path):
+                self.assertTrue(speedr.send_mpv([["set_property", "speed", 0.5]]))
+            server.close()
 
 
 if __name__ == "__main__":
