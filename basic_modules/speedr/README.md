@@ -15,7 +15,7 @@ For fast, seamless live control, use mpv's IPC backend. mpv keeps one player pro
 }
 ```
 
-On macOS install it with `brew install mpv`; on Debian/Ubuntu use `sudo apt install mpv`. Without `{player_ipc}`, speedr falls back to the generic filter/restart path, which is compatible with ffplay but necessarily slower while changing controls.
+On macOS install it with `brew install mpv`; on Debian/Ubuntu use `sudo apt install mpv`. Without `{player_ipc}`, speedr falls back to the generic filter/restart path, which is compatible with ffplay but necessarily slower while changing controls. When a new track starts, the current speed and pitch are applied immediately; the short debounce is used only while changing controls repeatedly.
 
 ## Install
 

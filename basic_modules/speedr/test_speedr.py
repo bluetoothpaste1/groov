@@ -86,6 +86,22 @@ class SpeedrTests(unittest.TestCase):
         self.assertEqual(commands[2][0:2], ["set_property", "pitch"])
         self.assertTrue(any(command[0:2] == ["af", "add"] for command in commands))
 
+    def test_new_track_applies_non_neutral_values_without_debounce(self):
+        speedr.values = {"speed": 35, "pitch": 65}
+        speedr.current_song = None
+        speedr.playback_timer = None
+        speedr.playback_generation = 0
+        with patch.object(speedr, "playback") as playback:
+            speedr.handle(
+                {
+                    "type": "event",
+                    "event": "play",
+                    "song": {"id": "2", "file": "/tmp/track.mp3"},
+                }
+            )
+        playback.assert_called_once_with()
+        self.assertIsNone(speedr.playback_timer)
+
     def test_ipc_commands_wait_for_backend_acknowledgements(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "player.sock")

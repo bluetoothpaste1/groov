@@ -379,10 +379,14 @@ def handle(request):
     elif request_type == "input":
         handle_key(str(request.get("key", "")))
     elif request_type == "event" and event == "play":
+        # A new player process starts immediately. Debouncing this event lets
+        # the track play briefly at neutral speed/pitch before IPC catches up;
+        # debounce is only useful for rapid slider key presses.
+        cancel_playback_timer()
         reverb_active = False
         set_song(request.get("song"))
         if values["speed"] != DEFAULT_VALUE or values["pitch"] != DEFAULT_VALUE:
-            schedule_playback()
+            flush_playback()
         if view_open:
             show()
     elif request_type == "event" and event == "stop":
