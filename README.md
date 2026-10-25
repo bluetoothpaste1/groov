@@ -5,8 +5,13 @@
 Current release: `1.0.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes and [LICENSE](LICENSE) for the MIT license.
 
 <p align="center">
-  <img src="screenshots/20261025143906.jpg" alt="groov normal mode" width="49%">
-  <img src="screenshots/20261025143835.jpg" alt="groov compact mode" width="49%">
+  <img src="screenshots/20261025143906.jpg" alt="groov normal mode (speedr module)" width="49%">
+  <img src="screenshots/20261025143835.jpg" alt="groov compact mode and cava" width="49%">
+</p>
+
+<p align="center">
+  <img src="screenshots/20261025143655.jpg" alt="groov normal mode" width="49%">
+  <img src="screenshots/20261025143849.jpg" alt="groov compact mode" width="49%">
 </p>
 
 ## Installation
