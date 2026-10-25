@@ -3,22 +3,6 @@ use std::process::{Child, Command, Stdio};
 
 use crate::config::Settings;
 
-pub fn start(settings: &Settings, audio: &Path, start_seconds: u64) -> Result<Child, String> {
-    start_with_filter_and_control(settings, audio, start_seconds, None, None)
-}
-
-/// Start the configured audio backend, optionally applying an audio filter.
-/// `{audio_filter}` can be used in a custom `player_command`; for the default
-/// ffplay backend the filter is appended automatically.
-pub fn start_with_filter(
-    settings: &Settings,
-    audio: &Path,
-    start_seconds: u64,
-    audio_filter: Option<&str>,
-) -> Result<Child, String> {
-    start_with_filter_and_control(settings, audio, start_seconds, audio_filter, None)
-}
-
 /// Start the backend with optional audio filtering and a generic live-control
 /// endpoint. Backends such as mpv can use `{player_ipc}` to expose their own
 /// command protocol without coupling groov to a particular player.
@@ -36,18 +20,27 @@ pub fn start_with_filter_and_control(
     {
         player_command = player_command.replacen("ffplay", &format!("ffplay -ss {start}"), 1);
     }
+    if player_ipc.is_some()
+        && player_command.contains("mpv")
+        && !player_command.contains("{player_ipc}")
+    {
+        player_command = player_command.replacen("mpv", "mpv --input-ipc-server={player_ipc}", 1);
+    }
     let filter_placeholder = player_command.contains("{audio_filter}");
     if let Some(filter) = audio_filter.filter(|_| !filter_placeholder) {
-        if !player_command.contains("ffplay") {
+        let live_backend = player_command.contains("mpv") && player_ipc.is_some();
+        if !player_command.contains("ffplay") && !live_backend {
             return Err("player_command must contain {audio_filter} to use an audio filter".into());
         }
-        let filter_option = format!("-af {}", shell_quote(filter));
-        if player_command.contains("{file}") {
-            player_command =
-                player_command.replacen("{file}", &format!("{filter_option} {{file}}"), 1);
-        } else {
-            player_command.push(' ');
-            player_command.push_str(&filter_option);
+        if !live_backend {
+            let filter_option = format!("-af {}", shell_quote(filter));
+            if player_command.contains("{file}") {
+                player_command =
+                    player_command.replacen("{file}", &format!("{filter_option} {{file}}"), 1);
+            } else {
+                player_command.push(' ');
+                player_command.push_str(&filter_option);
+            }
         }
     }
     let filter_argument = audio_filter
@@ -154,7 +147,7 @@ fn shell_quote(value: &str) -> String {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{start, start_with_filter, start_with_filter_and_control};
+    use super::start_with_filter_and_control;
     use crate::config::Settings;
     use std::fs;
     use tempfile::tempdir;
@@ -168,7 +161,7 @@ mod tests {
             player_command: "test \"{start}\" = 7 && test -f {file}".into(),
             ..Settings::default()
         };
-        let mut child = start(&settings, &audio, 7).unwrap();
+        let mut child = start_with_filter_and_control(&settings, &audio, 7, None, None).unwrap();
         let status = child.wait().unwrap();
         assert!(status.success());
     }
@@ -186,7 +179,9 @@ mod tests {
             ),
             ..Settings::default()
         };
-        let mut child = start_with_filter(&settings, &audio, 0, Some("atempo=0.750000")).unwrap();
+        let mut child =
+            start_with_filter_and_control(&settings, &audio, 0, Some("atempo=0.750000"), None)
+                .unwrap();
         assert!(child.wait().unwrap().success());
         assert_eq!(fs::read_to_string(marker).unwrap(), "-af 'atempo=0.750000'");
     }

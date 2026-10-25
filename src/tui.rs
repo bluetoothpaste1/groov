@@ -739,19 +739,13 @@ impl App {
         self.paused_at = None;
         let song = &self.songs[index];
         let player_ipc = self.paths.player_ipc_path();
-        let player = if self.settings.player_command.contains("{player_ipc}") {
-            player::start_with_filter_and_control(
-                &self.settings,
-                &song.audio,
-                offset_seconds,
-                audio_filter.as_deref(),
-                Some(&player_ipc),
-            )
-        } else if let Some(filter) = audio_filter.as_deref() {
-            player::start_with_filter(&self.settings, &song.audio, offset_seconds, Some(filter))
-        } else {
-            player::start(&self.settings, &song.audio, offset_seconds)
-        };
+        let player = player::start_with_filter_and_control(
+            &self.settings,
+            &song.audio,
+            offset_seconds,
+            audio_filter.as_deref(),
+            Some(&player_ipc),
+        );
         match player {
             Ok(child) => {
                 self.player = Some(child);
