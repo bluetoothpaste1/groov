@@ -16,6 +16,7 @@ The first public release of the Rust-based local player.
 
 Use this section for changes after 1.0.0. Every behavior change must update the documentation and tests in the same change.
 
+- Added composited RPC canvas layers with text, colors, shapes, z-order, percentage geometry, modal input, and a direct-terminal mode for independent module UIs.
 - Made speedr apply the selected speed and pitch immediately when a new track starts instead of waiting for the adjustment debounce.
 - Fixed seek with the default mpv backend and preserved seek for legacy mpv settings without `{start}`.
 - Added runtime `:mode normal|compact` switching. Compact view renders only the current cover and maps `j/k` to immediate adjacent-track playback.

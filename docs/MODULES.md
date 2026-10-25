@@ -12,7 +12,9 @@
 - работать из собственного каталога;
 - хранить любые дополнительные metadata;
 - отправлять JSONL RPC-ответы, из которых groov рендерит status, overlays, paragraphs, lists, gauges и declarative widget trees;
+- рисовать произвольные cell-based canvas layers поверх обычного интерфейса: текст, цвета, заливки, линии, рамки и процентную геометрию;
 - открывать интерактивные session views, закрывать их и просить groov пересканировать библиотеку;
+- запускать отдельную terminal UI с прямым владением экраном, если host-composited canvas недостаточно;
 - управлять playback через общий `playback` response: перезапускать текущий backend с фильтром, менять позицию, паузу и остановку;
 - временно менять цвет границ через `palette` response;
 - включаться, выключаться и перечитываться без перезапуска groov.
@@ -115,6 +117,7 @@ $XDG_CONFIG_HOME/groov/modules/<module-name>/module.json
   "enabled": true,
   "rpc": true,
   "session": true,
+  "terminal": false,
   "command": "python3",
   "args": ["main.py", "{event}", "{id}"],
   "events": ["play", "stop", "metadata"],
@@ -146,6 +149,7 @@ $XDG_CONFIG_HOME/groov/modules/<module-name>/module.json
 | enabled | boolean | false | отправлять events и разрешать commands |
 | rpc | boolean | false | включить JSONL request/response protocol |
 | session | boolean | false | держать RPC process живым между сообщениями |
+| terminal | boolean | false | передавать терминал отдельному command alias до его завершения |
 | command | string или null | null | executable, который запускается |
 | args | array<string> | [] | аргументы event hook |
 | events | array<string> | [] | фильтр событий; пустой список означает все |
@@ -426,7 +430,61 @@ for line in sys.stdin:
 
 Если модуль использует собственную команду backend вместо стандартного `ffplay`, добавьте `{audio_filter}` отдельным аргументом в `player_command` в место, где должны появляться параметры фильтра. Placeholder раскрывается в `-af 'FILTER'` при активном фильтре и в пустую строку без фильтра. Без этого placeholder фильтр можно использовать только с командой, содержащей `ffplay`.
 
-Widget tree поддерживает paragraph, list, gauge, row, column, stack и вложенные children с flex/direction. Это declarative слой поверх Ratatui: host остаётся владельцем terminal buffer, layout и lifecycle, а модуль владеет данными и состоянием view.
+Widget tree поддерживает paragraph, list, gauge, row, column, stack и вложенные children с flex/direction. Это совместимый declarative слой поверх Ratatui.
+
+### Canvas и слои
+
+RPC-модуль может вернуть `type: "canvas"`. Такой ответ сохраняется как слой с ключом `<module>::<id>` и заменяет предыдущую версию этого слоя. Слои рисуются после основного интерфейса в порядке `z`; поэтому модуль может сделать небольшой HUD, status bar, floating panel или полностью заменить содержимое экрана. `modal: true` направляет обычные клавиши в этот модуль, а `modal: false` оставляет библиотеку интерактивной под overlay. `mode: "replace"` включает оба свойства и очищает область слоя перед рисованием.
+
+Геометрия `rect` и координаты команд задаются в cell или процентами от доступной области. Область без `rect` занимает весь терминал. Поддерживаемые команды:
+
+| op | Поля | Результат |
+|---|---|---|
+| `text` | `x`, `y`, `text`, `width`/`max_width` | текст с clipping |
+| `fill` | `x`, `y`, `width`, `height`, `symbol` | заливка области |
+| `clear` | `x`, `y`, `width`, `height` | очистка области до host buffer |
+| `cell` | `x`, `y`, `symbol` | один символ |
+| `hline` / `vline` | координата, `width`/`height`, `symbol` | линия |
+| `line` | `x1`, `y1`, `x2`, `y2`, `symbol` | произвольная линия |
+| `rect` | `x`, `y`, `width`, `height` | рамка |
+
+Каждая команда принимает `style` или короткие поля `fg`, `bg`, `modifiers`; цвета используют hex и базовые имена из тем. Пример немодального overlay:
+
+~~~json
+{
+  "type": "canvas",
+  "id": "now-playing-hud",
+  "z": 40,
+  "modal": false,
+  "rect": {"x": "2%", "y": "2%", "width": "96%", "height": 5},
+  "commands": [
+    {"op": "fill", "x": 0, "y": 0, "width": "100%", "height": "100%", "bg": "#202030", "symbol": " "},
+    {"op": "rect", "x": 0, "y": 0, "width": "100%", "height": "100%", "fg": "#89b4fa"},
+    {"op": "text", "x": 2, "y": 2, "text": "Now playing", "fg": "#a6e3a1", "bold": true}
+  ]
+}
+~~~
+
+Чтобы удалить слой, отправьте тот же `id` с `"clear": true`. Максимум — 4096 команд в одном canvas-ответе; координаты всегда clipping-ятся host до терминала, поэтому ошибочный модуль не может записать за пределы buffer.
+
+### Полное владение терминалом
+
+Если нужен настоящий самостоятельный Ratatui/crossterm интерфейс, добавьте в manifest `"terminal": true` и alias в `commands`:
+
+~~~json
+{
+  "name": "my-app",
+  "enabled": true,
+  "terminal": true,
+  "command": "python3",
+  "args": ["app.py"],
+  "commands": [{"name": "my-app", "args": []}]
+}
+~~~
+
+При `:my-app` groov выключает raw mode и alternate screen, запускает процесс с inherited stdin/stdout/stderr и ждёт его завершения. Процесс получает стандартные `GROOV_*` переменные, включая `GROOV_TERMINAL=1` и `GROOV_PLAYER_IPC`, поэтому может использовать любой собственный terminal UI, мышь, alternate screen и библиотеку виджетов. После выхода groov безопасно восстанавливает свой экран и продолжает playback.
+
+Canvas и terminal mode дополняют друг друга: canvas подходит для overlays, HUD и взаимодействия с библиотекой, terminal mode — для приложения, которому нужен полный контроль над терминалом.
 
 ## Примеры реализации
 
@@ -591,7 +649,8 @@ cat /tmp/hello.log
 - stdout/stderr модуля не попадают в экран;
 - падение модуля не ломает player process;
 - повторный :reload позволяет исправить manifest без рестарта;
-- module command не должен блокировать ожиданием stdin: stdin закрыт.
+- обычный detached module command получает закрытый stdin и не должен блокировать ожиданием ввода;
+- `terminal: true` — явное исключение: такой alias получает inherited stdin/stdout/stderr и может работать интерактивно до выхода.
 
 ## Совместимость и версия API
 
@@ -607,6 +666,8 @@ GROOV_API_VERSION=1 — версия environment contract. Модуль долж
 
 При несовместимом изменении contract увеличьте API version и опишите миграцию.
 
-## Ограничения текущего API
+## Границы и совместимость
 
-Модульный API расширяет команды, key bindings, process hooks и интеграции, а JSONL RPC позволяет возвращать декларативные views, palette updates, close и rescan messages. Произвольный Rust Ratatui widget напрямую не загружается: модуль владеет данными, а groov — terminal buffer и lifecycle. Долгоживущие sessions и streaming notifications уже поддерживаются через `session: true`; v1 оставляет для новых view types явные type/data границы.
+Процессная граница сохраняется для безопасности и языковой независимости. Внутри обычного host UI модуль рисует через canvas protocol, который не зависит от Rust ABI и позволяет реализовать собственные виджеты на уровне terminal cells. Когда нужен прямой доступ к Ratatui, crossterm, mouse events или alternate screen, используйте `terminal: true`: в этом режиме host временно освобождает терминал и не ограничивает UI модуля своим layout или buffer.
+
+Неизвестные canvas-команды игнорируются, неизвестные JSON-поля сохраняются, а старые `status`, `overlay`, `view` и `playback` ответы работают без изменений. Долгоживущие sessions и streaming notifications остаются совместимыми с `session: true`.

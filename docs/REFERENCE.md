@@ -301,8 +301,11 @@ stdin, stdout и stderr процесса изолированы. Пауза/пр
 | `GROOV_SONG_ID` | ID, если есть song |
 | `GROOV_SONG_FILE` | absolute/normalized path, если есть song |
 | `GROOV_PLAYER_IPC` | путь к локальному control endpoint для backend, если он поддерживает IPC |
+| `GROOV_TERMINAL` | `1` для command alias с `terminal: true` |
 
 Если module field `rpc` равен true, stdin/stdout используются JSONL protocol. При `session: true` один process принимает последовательность requests, включая input/key messages; request/response schema и declarative widgets описаны в [MODULES.md](MODULES.md).
+
+RPC response `type: "canvas"` рисует cell-based слой поверх host UI. Слой имеет `id`, `z`, `modal`, `opaque`, `rect` и `commands`; полный список операций и пример находятся в [MODULES.md](MODULES.md). Manifest field `terminal: true` передаёт указанный command alias отдельному процессу с inherited stdin/stdout/stderr, чтобы модуль мог запустить собственный Ratatui/crossterm UI.
 
 `GROOV_EVENT_JSON` сейчас содержит:
 

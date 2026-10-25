@@ -77,6 +77,10 @@ pub struct ModuleConfig {
     /// Keep an RPC process alive and stream requests over its stdin.
     #[serde(default)]
     pub session: bool,
+    /// Run a command with direct terminal ownership when its alias is invoked.
+    /// The host suspends its TUI until the command exits.
+    #[serde(default)]
+    pub terminal: bool,
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
@@ -673,6 +677,23 @@ mod tests {
     }
 
     #[test]
+    fn terminal_module_manifest_enables_direct_terminal_mode() {
+        let module: super::ModuleConfig = serde_json::from_str(
+            r#"{
+                "name":"terminal-demo",
+                "enabled":true,
+                "terminal":true,
+                "command":"python3",
+                "args":["app.py"],
+                "commands":[{"name":"demo"}]
+            }"#,
+        )
+        .unwrap();
+        assert!(module.terminal);
+        assert_eq!(module.commands[0].name, "demo");
+    }
+
+    #[test]
     fn basic_module_manifests_use_the_public_session_contract() {
         let flame: super::ModuleConfig =
             serde_json::from_str(include_str!("../basic_modules/flame/module.json")).unwrap();
@@ -690,6 +711,20 @@ mod tests {
         assert_eq!(speedr.commands[0].name, "speedr");
         assert_eq!(speedr.keys.get("s").map(String::as_str), Some("speedr"));
         assert!(speedr.events.iter().any(|event| event == "play"));
+    }
+
+    #[test]
+    fn canvas_example_manifest_uses_rpc_session_contract() {
+        let module: super::ModuleConfig = serde_json::from_str(include_str!(
+            "../examples/modules/canvas_overlay/module.json"
+        ))
+        .unwrap();
+        assert!(module.rpc && module.session);
+        assert_eq!(module.commands[0].name, "canvas-overlay");
+        assert_eq!(
+            module.keys.get("O").map(String::as_str),
+            Some("canvas-overlay")
+        );
     }
 
     #[test]

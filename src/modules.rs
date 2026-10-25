@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
@@ -24,6 +25,89 @@ pub struct ModuleOutput {
     pub data: Value,
     pub flush: bool,
     pub widget: Option<ModuleWidgetNode>,
+}
+
+/// A host-composited drawing layer emitted by an RPC module. Commands are
+/// deliberately cell-based rather than Ratatui-specific so modules can be
+/// written in any language while still drawing arbitrary terminal UIs.
+#[derive(Debug, Clone)]
+pub struct ModuleCanvas {
+    pub module: String,
+    pub id: String,
+    pub z: i32,
+    pub modal: bool,
+    pub opaque: bool,
+    pub clear: bool,
+    pub rect: Value,
+    pub commands: Vec<Value>,
+}
+
+/// A command that temporarily receives the real terminal. This is the escape
+/// hatch for modules that need their own Ratatui app, alternate-screen flow,
+/// mouse handling, or any other terminal UI that cannot be represented as a
+/// host-composited canvas.
+#[derive(Debug, Clone)]
+pub struct TerminalCommand {
+    pub module: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub env: BTreeMap<String, String>,
+    pub song_id: Option<String>,
+    pub song_file: Option<PathBuf>,
+}
+
+impl ModuleCanvas {
+    pub(crate) fn from_value(module: &str, value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        let source = object.get("canvas").unwrap_or(value);
+        let source = source.as_object()?;
+        let mode = source
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("overlay");
+        let id = source
+            .get("id")
+            .or_else(|| source.get("layer"))
+            .and_then(Value::as_str)
+            .unwrap_or(module)
+            .trim();
+        if id.is_empty() || id.len() > 128 {
+            return None;
+        }
+        let commands = source
+            .get("commands")
+            .or_else(|| source.get("draw"))
+            .and_then(Value::as_array)
+            .map(|commands| commands.iter().take(4096).cloned().collect())
+            .unwrap_or_default();
+        Some(Self {
+            module: module.to_string(),
+            id: id.to_string(),
+            z: source
+                .get("z")
+                .and_then(Value::as_i64)
+                .map(|value| value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
+                .unwrap_or(0),
+            modal: source
+                .get("modal")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                || mode.eq_ignore_ascii_case("modal")
+                || mode.eq_ignore_ascii_case("replace"),
+            opaque: source
+                .get("opaque")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                || mode.eq_ignore_ascii_case("replace"),
+            clear: source
+                .get("clear")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            rect: source.get("rect").cloned().unwrap_or_else(|| json!({})),
+            commands,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -224,6 +308,57 @@ impl ModuleRuntime {
             Some(&self.output),
             Some(&self.paths),
         )
+    }
+
+    pub fn terminal_command(
+        &self,
+        settings: &Settings,
+        command_name: &str,
+        args: &[String],
+        song: Option<&Song>,
+    ) -> Option<Result<TerminalCommand, String>> {
+        for module in settings
+            .modules
+            .iter()
+            .filter(|module| module.enabled && module.terminal)
+        {
+            let Some(alias) = module
+                .commands
+                .iter()
+                .find(|item| item.name.eq_ignore_ascii_case(command_name))
+            else {
+                continue;
+            };
+            let Some(command) = module.command.clone() else {
+                return Some(Err(format!("module {} has no command", module.name)));
+            };
+            let event = format!("command:{command_name}");
+            let mut command_args = module.args.clone();
+            command_args.extend(alias.args.clone());
+            command_args.extend(args.iter().cloned());
+            let mut env = BTreeMap::from([
+                ("GROOV_API_VERSION".into(), "1".into()),
+                ("GROOV_EVENT".into(), event.clone()),
+                ("GROOV_EVENT_JSON".into(), event_payload(&event, song)),
+                ("GROOV_TERMINAL".into(), "1".into()),
+            ]);
+            for (key, value) in &module.env {
+                env.insert(key.clone(), interpolate(value, &event, song));
+            }
+            return Some(Ok(TerminalCommand {
+                module: module.name.clone(),
+                command,
+                args: command_args
+                    .iter()
+                    .map(|value| interpolate(value, &event, song))
+                    .collect(),
+                cwd: module.cwd.clone(),
+                env,
+                song_id: song.map(|song| song.info.id.clone()),
+                song_file: song.map(|song| song.audio.clone()),
+            }));
+        }
+        None
     }
 
     pub fn send_input(&self, settings: &Settings, module_name: &str, key: &str) -> bool {
@@ -674,10 +809,12 @@ fn interpolate(value: &str, event: &str, song: Option<&Song>) -> String {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{spawn_rpc, spawn_session, ModuleOutput, ModuleWidgetNode};
-    use crate::config::ModuleConfig;
+    use super::{spawn_rpc, spawn_session, ModuleCanvas, ModuleOutput, ModuleWidgetNode};
+    use crate::config::{ModuleConfig, Settings};
+    use crate::paths::AppPaths;
     use std::sync::mpsc;
     use std::time::Duration;
+    use tempfile::tempdir;
 
     #[test]
     fn rpc_process_receives_json_and_returns_a_view() {
@@ -738,5 +875,78 @@ mod tests {
         assert_eq!(widget.children.len(), 2);
         assert_eq!(widget.children[0].flex, 2);
         let _typed: ModuleWidgetNode = widget;
+    }
+
+    #[test]
+    fn canvas_response_parses_layers_and_limits_commands() {
+        let value = serde_json::json!({
+            "type": "canvas",
+            "layer": "hud",
+            "z": 12,
+            "mode": "replace",
+            "rect": {"x": "10%", "y": 2, "width": "80%", "height": 12},
+            "commands": [
+                {"op": "text", "x": 1, "y": 1, "text": "hello", "fg": "cyan"}
+            ]
+        });
+        let canvas = ModuleCanvas::from_value("demo", &value).unwrap();
+        assert_eq!(canvas.id, "hud");
+        assert_eq!(canvas.z, 12);
+        assert!(canvas.modal);
+        assert!(canvas.opaque);
+        assert_eq!(canvas.commands.len(), 1);
+        assert_eq!(canvas.rect["width"], "80%");
+    }
+
+    #[test]
+    fn canvas_response_defaults_to_non_modal_overlay() {
+        let value = serde_json::json!({
+            "type": "canvas",
+            "commands": [{"op": "text", "text": "hud"}]
+        });
+        let canvas = ModuleCanvas::from_value("demo", &value).unwrap();
+        assert_eq!(canvas.id, "demo");
+        assert!(!canvas.modal);
+        assert!(!canvas.opaque);
+    }
+
+    #[test]
+    fn terminal_command_expands_alias_and_marks_terminal_environment() {
+        let temp = tempdir().unwrap();
+        let paths = AppPaths {
+            config_dir: temp.path().join("config"),
+            settings_file: temp.path().join("config/settings.json"),
+            data_dir: temp.path().join("data"),
+            songs_dir: temp.path().join("data/songs"),
+            cache_dir: temp.path().join("cache"),
+        };
+        let module: ModuleConfig = serde_json::from_str(
+            r#"{
+                "name":"terminal-demo",
+                "enabled":true,
+                "terminal":true,
+                "command":"demo",
+                "args":["app.py"],
+                "commands":[{"name":"open","args":["{event}"]}],
+                "env":{"DEMO_ID":"{id}"}
+            }"#,
+        )
+        .unwrap();
+        let settings = Settings {
+            modules: vec![module],
+            ..Settings::default()
+        };
+        let (tx, _rx) = mpsc::channel();
+        let runtime = super::ModuleRuntime::new(paths, tx);
+        let command = runtime
+            .terminal_command(&settings, "open", &["arg".into()], None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(command.args, vec!["app.py", "command:open", "arg"]);
+        assert_eq!(
+            command.env.get("GROOV_TERMINAL").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(command.env.get("DEMO_ID").map(String::as_str), Some("{id}"));
     }
 }

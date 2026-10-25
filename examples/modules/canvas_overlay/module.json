@@ -1,0 +1,18 @@
+{
+  "name": "canvas-overlay",
+  "version": "1.0.0",
+  "description": "Canvas HUD and fullscreen module example.",
+  "author": "groov contributors",
+  "enabled": false,
+  "rpc": true,
+  "session": true,
+  "command": "python3",
+  "args": ["overlay.py"],
+  "events": ["play", "stop", "command:canvas-overlay"],
+  "commands": [
+    { "name": "canvas-overlay", "args": [] }
+  ],
+  "keys": {
+    "O": "canvas-overlay"
+  }
+}

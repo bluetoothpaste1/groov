@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Child;
+use std::process::{Child, Command};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -10,6 +11,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -117,6 +119,8 @@ struct App {
     module_outputs: Receiver<modules::ModuleOutput>,
     module_runtime: modules::ModuleRuntime,
     module_widget: Option<modules::ModuleWidgetNode>,
+    module_canvases: HashMap<String, modules::ModuleCanvas>,
+    pending_terminal: Option<modules::TerminalCommand>,
     module_border: Option<Color>,
 }
 
@@ -174,6 +178,8 @@ impl App {
             module_outputs,
             module_runtime,
             module_widget: None,
+            module_canvases: HashMap::new(),
+            pending_terminal: None,
             module_border: None,
         };
         app.refresh_visible();
@@ -284,6 +290,9 @@ impl App {
                         if self.handle_key(key) || self.should_quit {
                             break;
                         }
+                        if let Some(command) = self.pending_terminal.take() {
+                            self.run_terminal_module(terminal, command)?;
+                        }
                         dirty = true;
                     }
                     Event::Resize(_, _) => dirty = true,
@@ -333,11 +342,94 @@ impl App {
         Ok(())
     }
 
+    fn run_terminal_module(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        command: modules::TerminalCommand,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        terminal::disable_raw_mode()?;
+        execute!(terminal.backend_mut(), Show, LeaveAlternateScreen)?;
+
+        let result = (|| -> Result<std::process::ExitStatus, Box<dyn std::error::Error>> {
+            let mut process = Command::new(&command.command);
+            if let Some(cwd) = command.cwd.as_deref() {
+                process.current_dir(cwd);
+            }
+            process.args(&command.args);
+            process.env("GROOV_CONFIG_DIR", &self.paths.config_dir);
+            process.env("GROOV_SETTINGS_FILE", &self.paths.settings_file);
+            process.env("GROOV_DATA_DIR", &self.paths.data_dir);
+            process.env("GROOV_SONGS_DIR", &self.paths.songs_dir);
+            process.env("GROOV_CACHE_DIR", &self.paths.cache_dir);
+            process.env("GROOV_PLAYER_IPC", self.paths.player_ipc_path());
+            for (key, value) in &command.env {
+                process.env(key, value);
+            }
+            if let Some(song_id) = command.song_id.as_deref() {
+                process.env("GROOV_SONG_ID", song_id);
+            }
+            if let Some(song_file) = command.song_file.as_deref() {
+                process.env("GROOV_SONG_FILE", song_file);
+            }
+            Ok(process.status()?)
+        })();
+
+        terminal::enable_raw_mode()?;
+        execute!(terminal.backend_mut(), EnterAlternateScreen, Hide)?;
+        terminal.clear()?;
+        match result {
+            Ok(status) if status.success() => {
+                self.status = format!("terminal module {} finished", command.module);
+            }
+            Ok(status) => {
+                self.status = format!(
+                    "terminal module {} exited with {}",
+                    command.module,
+                    status
+                        .code()
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| "a signal".into())
+                );
+            }
+            Err(error) => {
+                self.status = format!("cannot run terminal module {}: {error}", command.module);
+            }
+        }
+        Ok(())
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> bool {
         if self.view_mode == ViewMode::Compact && self.input_mode == InputMode::Normal {
             self.show_help = false;
             self.module_info = None;
             self.module_widget = None;
+        }
+        if self.input_mode == InputMode::Normal {
+            if let Some((module_name, _)) = self.active_modal_canvas() {
+                if key.code == KeyCode::Esc
+                    || (key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('c'))
+                {
+                    let _ = self
+                        .module_runtime
+                        .send_input(&self.settings, &module_name, "escape");
+                    self.close_modal_canvas(&module_name);
+                    return false;
+                }
+                if key.code == KeyCode::Char(':') {
+                    self.input_mode = InputMode::Command;
+                    self.input.clear();
+                    self.input_prefix = ':';
+                    return false;
+                }
+                if !self
+                    .module_runtime
+                    .send_input(&self.settings, &module_name, &key_name(&key))
+                {
+                    self.close_modal_canvas(&module_name);
+                }
+                return false;
+            }
         }
         if self.module_widget.is_some() && self.input_mode == InputMode::Normal {
             if key.code == KeyCode::Esc
@@ -395,8 +487,32 @@ impl App {
                 .module_runtime
                 .send_input(&self.settings, &widget.module, "escape");
         }
+        if let Some((module_name, _)) = self.active_modal_canvas() {
+            let _ = self
+                .module_runtime
+                .send_input(&self.settings, &module_name, "escape");
+            self.close_modal_canvas(&module_name);
+        }
         self.module_widget = None;
         self.module_info = None;
+    }
+
+    fn active_modal_canvas(&self) -> Option<(String, String)> {
+        self.module_canvases
+            .values()
+            .filter(|canvas| canvas.modal)
+            .max_by_key(|canvas| (canvas.z, canvas.module.clone(), canvas.id.clone()))
+            .map(|canvas| (canvas.module.clone(), canvas.id.clone()))
+    }
+
+    fn close_modal_canvas(&mut self, module_name: &str) {
+        self.module_canvases
+            .retain(|_, canvas| canvas.module != module_name || !canvas.modal);
+        if self.input_mode == InputMode::Command {
+            self.input_mode = InputMode::Normal;
+            self.input.clear();
+            self.input_prefix = ':';
+        }
     }
 
     fn handle_normal(&mut self, key: KeyEvent) -> bool {
@@ -956,7 +1072,9 @@ impl App {
         if matches!(
             command.to_ascii_lowercase().as_str(),
             "q" | "quit" | "close"
-        ) && (self.module_widget.is_some() || self.module_info.is_some())
+        ) && (self.module_widget.is_some()
+            || self.module_info.is_some()
+            || self.active_modal_canvas().is_some())
         {
             self.close_module_view();
             self.status = "module view closed".into();
@@ -972,6 +1090,9 @@ impl App {
         }
         if command.eq_ignore_ascii_case("modules") {
             self.handle_modules_command(args);
+            return;
+        }
+        if self.request_terminal_module(command, args) {
             return;
         }
         if let Some(result) = self.module_runtime.dispatch_command(
@@ -1089,6 +1210,7 @@ impl App {
                     self.follow_playback = settings.follow_playback;
                     self.settings = settings;
                     self.module_border = None;
+                    self.module_canvases.clear();
                     self.configure_image_picker();
                     self.status = "configuration and modules reloaded".into();
                 }
@@ -1467,6 +1589,9 @@ impl App {
         let Some(command) = tokens.first() else {
             return;
         };
+        if self.request_terminal_module(command, tokens.get(1..).unwrap_or(&[])) {
+            return;
+        }
         let result = self.module_runtime.dispatch_command(
             &self.settings,
             command,
@@ -1484,6 +1609,25 @@ impl App {
             Some(Err(error)) => error,
             None => unreachable!(),
         };
+    }
+
+    fn request_terminal_module(&mut self, command: &str, args: &[String]) -> bool {
+        let Some(result) = self.module_runtime.terminal_command(
+            &self.settings,
+            command,
+            args,
+            self.selected_song(),
+        ) else {
+            return false;
+        };
+        match result {
+            Ok(command) => {
+                self.status = format!("starting terminal module {}", command.module);
+                self.pending_terminal = Some(command);
+            }
+            Err(error) => self.status = error,
+        }
+        true
     }
 
     fn update_selected_info<F>(&mut self, event: &str, update: F)
@@ -1576,6 +1720,23 @@ impl App {
         let mut changed = false;
         while let Ok(output) = self.module_outputs.try_recv() {
             changed |= output.flush;
+            if output.kind.eq_ignore_ascii_case("canvas") {
+                if let Some(canvas) =
+                    modules::ModuleCanvas::from_value(&output.module, &output.data)
+                {
+                    let key = format!("{}::{}", canvas.module, canvas.id);
+                    if canvas.clear {
+                        self.module_canvases.remove(&key);
+                    } else {
+                        self.module_canvases.insert(key, canvas);
+                    }
+                    changed = true;
+                } else {
+                    self.status = format!("module {} sent an invalid canvas", output.module);
+                    changed = true;
+                }
+                continue;
+            }
             match output.kind.as_str() {
                 "status" => {
                     self.status = if output.text.is_empty() {
@@ -1634,6 +1795,8 @@ impl App {
                 "close" => {
                     self.module_info = None;
                     self.module_widget = None;
+                    self.module_canvases
+                        .retain(|_, canvas| canvas.module != output.module || !canvas.modal);
                 }
                 "playback" => self.handle_module_playback(&output.module, &output.data),
                 "rescan" => match scan(&self.paths) {
@@ -1907,6 +2070,7 @@ impl App {
             Paragraph::new(footer).style(Style::default().fg(palette.muted)),
             layout[4],
         );
+        self.draw_module_canvases(frame, palette);
         if self.show_help {
             self.draw_help(frame, palette);
         }
@@ -1949,6 +2113,7 @@ impl App {
                 protocol,
             );
         }
+        self.draw_module_canvases(frame, palette);
         if self.input_mode == InputMode::Command {
             let prompt = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
             frame.render_widget(
@@ -2105,6 +2270,27 @@ impl App {
         self.render_module_node(frame, palette, area, widget);
     }
 
+    fn draw_module_canvases(&self, frame: &mut Frame<'_>, palette: Palette) {
+        let mut layers = self.module_canvases.values().collect::<Vec<_>>();
+        layers.sort_by_key(|canvas| (canvas.z, canvas.module.clone(), canvas.id.clone()));
+        for canvas in layers {
+            let area = canvas_area(&canvas.rect, frame.area());
+            if area.width == 0 || area.height == 0 {
+                continue;
+            }
+            if canvas.opaque {
+                frame.render_widget(Clear, area);
+                fill_canvas_rect(
+                    frame.buffer_mut(),
+                    area,
+                    Style::default().bg(palette.background),
+                    " ",
+                );
+            }
+            render_canvas_commands(frame.buffer_mut(), area, palette, &canvas.commands);
+        }
+    }
+
     fn render_module_node(
         &self,
         frame: &mut Frame<'_>,
@@ -2259,6 +2445,350 @@ fn parse_color(value: &str, fallback: Color) -> Color {
         "darkgray" | "dark-grey" => Color::DarkGray,
         "reset" => Color::Reset,
         _ => fallback,
+    }
+}
+
+fn canvas_area(rect_value: &serde_json::Value, screen: Rect) -> Rect {
+    let object = rect_value.as_object();
+    let x = canvas_metric(object.and_then(|value| value.get("x")), screen.width, 0);
+    let y = canvas_metric(object.and_then(|value| value.get("y")), screen.height, 0);
+    let width = canvas_metric(
+        object.and_then(|value| value.get("width").or_else(|| value.get("w"))),
+        screen.width,
+        i32::from(screen.width),
+    )
+    .clamp(0, i32::from(screen.width)) as u16;
+    let height = canvas_metric(
+        object.and_then(|value| value.get("height").or_else(|| value.get("h"))),
+        screen.height,
+        i32::from(screen.height),
+    )
+    .clamp(0, i32::from(screen.height)) as u16;
+    let x = x.clamp(0, i32::from(screen.width)) as u16;
+    let y = y.clamp(0, i32::from(screen.height)) as u16;
+    let x = screen.x.saturating_add(x).min(screen.right());
+    let y = screen.y.saturating_add(y).min(screen.bottom());
+    Rect::new(
+        x,
+        y,
+        width.min(screen.right().saturating_sub(x)),
+        height.min(screen.bottom().saturating_sub(y)),
+    )
+}
+
+fn canvas_metric(value: Option<&serde_json::Value>, total: u16, default: i32) -> i32 {
+    let Some(value) = value else {
+        return default;
+    };
+    if let Some(number) = value.as_i64() {
+        return number.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+    }
+    let Some(text) = value.as_str().map(str::trim) else {
+        return default;
+    };
+    let Some(percent) = text.strip_suffix('%') else {
+        return text.parse::<i32>().unwrap_or(default);
+    };
+    percent
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .map(|value| (value * f64::from(total) / 100.0).round() as i32)
+        .unwrap_or(default)
+}
+
+fn canvas_command_rect(
+    area: Rect,
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Rect> {
+    let x = canvas_command_coord(object.get("x"), area.width);
+    let y = canvas_command_coord(object.get("y"), area.height);
+    let width = canvas_metric(
+        object.get("width").or_else(|| object.get("w")),
+        area.width,
+        1,
+    )
+    .clamp(0, i32::from(area.width).saturating_add(1));
+    let height = canvas_metric(
+        object.get("height").or_else(|| object.get("h")),
+        area.height,
+        1,
+    )
+    .clamp(0, i32::from(area.height).saturating_add(1));
+    let left = i32::from(area.x) + x;
+    let top = i32::from(area.y) + y;
+    let right = left.saturating_add(width);
+    let bottom = top.saturating_add(height);
+    let clip_left = left.max(i32::from(area.x));
+    let clip_top = top.max(i32::from(area.y));
+    let clip_right = right.min(i32::from(area.right()));
+    let clip_bottom = bottom.min(i32::from(area.bottom()));
+    if clip_right <= clip_left || clip_bottom <= clip_top {
+        return None;
+    }
+    Some(Rect::new(
+        clip_left as u16,
+        clip_top as u16,
+        (clip_right - clip_left) as u16,
+        (clip_bottom - clip_top) as u16,
+    ))
+}
+
+fn canvas_command_coord(value: Option<&serde_json::Value>, total: u16) -> i32 {
+    let limit = i32::from(total).saturating_add(1);
+    canvas_metric(value, total, 0).clamp(-limit, limit)
+}
+
+fn canvas_style(value: &serde_json::Value, palette: Palette) -> Style {
+    let style_value = value.get("style").unwrap_or(value);
+    let object = style_value.as_object();
+    let foreground = object
+        .and_then(|value| {
+            value
+                .get("fg")
+                .or_else(|| value.get("foreground"))
+                .or_else(|| value.get("color"))
+        })
+        .and_then(serde_json::Value::as_str)
+        .map(|value| parse_color(value, palette.foreground))
+        .unwrap_or(palette.foreground);
+    let mut style = Style::default().fg(foreground);
+    if let Some(background) = object
+        .and_then(|value| value.get("bg").or_else(|| value.get("background")))
+        .and_then(serde_json::Value::as_str)
+    {
+        style = style.bg(parse_color(background, palette.background));
+    }
+    let mut modifiers = Modifier::empty();
+    if let Some(values) = object
+        .and_then(|value| value.get("modifiers"))
+        .and_then(serde_json::Value::as_array)
+    {
+        for modifier in values.iter().filter_map(serde_json::Value::as_str) {
+            modifiers.insert(match modifier.to_ascii_lowercase().as_str() {
+                "bold" => Modifier::BOLD,
+                "dim" => Modifier::DIM,
+                "italic" => Modifier::ITALIC,
+                "underlined" | "underline" => Modifier::UNDERLINED,
+                "reversed" | "reverse" => Modifier::REVERSED,
+                "crossed_out" | "crossed-out" | "strike" => Modifier::CROSSED_OUT,
+                "slow_blink" | "slow-blink" => Modifier::SLOW_BLINK,
+                "rapid_blink" | "rapid-blink" => Modifier::RAPID_BLINK,
+                "hidden" => Modifier::HIDDEN,
+                _ => Modifier::empty(),
+            });
+        }
+    }
+    for (name, modifier) in [
+        ("bold", Modifier::BOLD),
+        ("dim", Modifier::DIM),
+        ("italic", Modifier::ITALIC),
+        ("underlined", Modifier::UNDERLINED),
+        ("reversed", Modifier::REVERSED),
+        ("hidden", Modifier::HIDDEN),
+    ] {
+        if object
+            .and_then(|value| value.get(name))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            modifiers.insert(modifier);
+        }
+    }
+    style.add_modifier(modifiers)
+}
+
+fn fill_canvas_rect(buffer: &mut Buffer, area: Rect, style: Style, symbol: &str) {
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            buffer[(x, y)].set_symbol(symbol).set_style(style);
+        }
+    }
+}
+
+fn clear_canvas_rect(buffer: &mut Buffer, area: Rect) {
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            buffer[(x, y)].reset();
+        }
+    }
+}
+
+fn set_canvas_cell(buffer: &mut Buffer, area: Rect, x: i32, y: i32, symbol: &str, style: Style) {
+    let x = i32::from(area.x) + x;
+    let y = i32::from(area.y) + y;
+    if x < i32::from(area.x)
+        || y < i32::from(area.y)
+        || x >= i32::from(area.right())
+        || y >= i32::from(area.bottom())
+    {
+        return;
+    }
+    buffer[(x as u16, y as u16)]
+        .set_symbol(symbol)
+        .set_style(style);
+}
+
+fn canvas_symbol(object: &serde_json::Map<String, serde_json::Value>, default: &str) -> String {
+    object
+        .get("symbol")
+        .or_else(|| object.get("char"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| value.chars().next())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn render_canvas_commands(
+    buffer: &mut Buffer,
+    area: Rect,
+    palette: Palette,
+    commands: &[serde_json::Value],
+) {
+    for command in commands {
+        let Some(object) = command.as_object() else {
+            continue;
+        };
+        let operation = object
+            .get("op")
+            .or_else(|| object.get("kind"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let style = canvas_style(command, palette);
+        match operation.as_str() {
+            "clear" => {
+                if let Some(rect) = canvas_command_rect(area, object) {
+                    clear_canvas_rect(buffer, rect);
+                }
+            }
+            "fill" => {
+                if let Some(rect) = canvas_command_rect(area, object) {
+                    let symbol = canvas_symbol(object, " ");
+                    fill_canvas_rect(buffer, rect, style, &symbol);
+                }
+            }
+            "text" | "print" => {
+                let x = canvas_command_coord(object.get("x"), area.width);
+                let y = canvas_command_coord(object.get("y"), area.height);
+                if x < 0 || y < 0 {
+                    continue;
+                }
+                let x = i32::from(area.x) + x;
+                let y = i32::from(area.y) + y;
+                if x >= i32::from(area.right()) || y >= i32::from(area.bottom()) {
+                    continue;
+                }
+                let text = object
+                    .get("text")
+                    .or_else(|| object.get("value"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let max_width = canvas_metric(
+                    object.get("max_width").or_else(|| object.get("width")),
+                    area.width,
+                    i32::from(area.right()).saturating_sub(x),
+                )
+                .max(0) as usize;
+                buffer.set_stringn(x as u16, y as u16, text, max_width, style);
+            }
+            "cell" | "glyph" => {
+                let x = canvas_command_coord(object.get("x"), area.width);
+                let y = canvas_command_coord(object.get("y"), area.height);
+                let symbol = canvas_symbol(object, " ");
+                set_canvas_cell(buffer, area, x, y, &symbol, style);
+            }
+            "hline" | "horizontal" => {
+                let x = canvas_command_coord(object.get("x"), area.width);
+                let y = canvas_command_coord(object.get("y"), area.height);
+                let width = canvas_metric(
+                    object.get("width").or_else(|| object.get("w")),
+                    area.width,
+                    i32::from(area.width),
+                )
+                .clamp(0, i32::from(area.width).saturating_add(1));
+                let symbol = canvas_symbol(object, "─");
+                for offset in 0..width {
+                    set_canvas_cell(buffer, area, x + offset, y, &symbol, style);
+                }
+            }
+            "vline" | "vertical" => {
+                let x = canvas_command_coord(object.get("x"), area.width);
+                let y = canvas_command_coord(object.get("y"), area.height);
+                let height = canvas_metric(
+                    object.get("height").or_else(|| object.get("h")),
+                    area.height,
+                    i32::from(area.height),
+                )
+                .clamp(0, i32::from(area.height).saturating_add(1));
+                let symbol = canvas_symbol(object, "│");
+                for offset in 0..height {
+                    set_canvas_cell(buffer, area, x, y + offset, &symbol, style);
+                }
+            }
+            "rect" | "border" => {
+                let Some(rect) = canvas_command_rect(area, object) else {
+                    continue;
+                };
+                let right = rect.width.saturating_sub(1) as i32;
+                let bottom = rect.height.saturating_sub(1) as i32;
+                let horizontal = canvas_symbol(object, "─");
+                let vertical = object
+                    .get("vertical")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| value.chars().next())
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "│".into());
+                for x in 0..=right {
+                    set_canvas_cell(buffer, rect, x, 0, &horizontal, style);
+                    set_canvas_cell(buffer, rect, x, bottom, &horizontal, style);
+                }
+                for y in 0..=bottom {
+                    set_canvas_cell(buffer, rect, 0, y, &vertical, style);
+                    set_canvas_cell(buffer, rect, right, y, &vertical, style);
+                }
+                set_canvas_cell(buffer, rect, 0, 0, "┌", style);
+                set_canvas_cell(buffer, rect, right, 0, "┐", style);
+                set_canvas_cell(buffer, rect, 0, bottom, "└", style);
+                set_canvas_cell(buffer, rect, right, bottom, "┘", style);
+            }
+            "line" => {
+                let mut x0 =
+                    canvas_command_coord(object.get("x1").or_else(|| object.get("x")), area.width);
+                let mut y0 =
+                    canvas_command_coord(object.get("y1").or_else(|| object.get("y")), area.height);
+                let x1 = object
+                    .get("x2")
+                    .map(|value| canvas_command_coord(Some(value), area.width))
+                    .unwrap_or(x0);
+                let y1 = object
+                    .get("y2")
+                    .map(|value| canvas_command_coord(Some(value), area.height))
+                    .unwrap_or(y0);
+                let symbol = canvas_symbol(object, "•");
+                let dx = (x1 - x0).abs();
+                let sx = if x0 < x1 { 1 } else { -1 };
+                let dy = -(y1 - y0).abs();
+                let sy = if y0 < y1 { 1 } else { -1 };
+                let mut error = dx + dy;
+                loop {
+                    set_canvas_cell(buffer, area, x0, y0, &symbol, style);
+                    if x0 == x1 && y0 == y1 {
+                        break;
+                    }
+                    let doubled = error * 2;
+                    if doubled >= dy {
+                        error += dy;
+                        x0 += sx;
+                    }
+                    if doubled <= dx {
+                        error += dx;
+                        y0 += sy;
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -2676,13 +3206,16 @@ fn centered_cover(area: Rect, requested_width: u16, font_size: (u16, u16)) -> Re
 #[cfg(test)]
 mod tests {
     use super::{
-        module_audio_filter, next_visible_queue_position, parse_command_line,
-        previous_visible_queue_position, split_tag_args, App, InputMode, ViewMode,
+        canvas_area, module_audio_filter, next_visible_queue_position, parse_command_line,
+        previous_visible_queue_position, render_canvas_commands, split_tag_args, App, InputMode,
+        Palette, ViewMode,
     };
     use crate::config::Settings;
     use crate::library::{Song, SongInfo};
     use crate::paths::AppPaths;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
     use ratatui::style::Color;
     use std::fs;
     use std::time::Instant;
@@ -2932,6 +3465,46 @@ mod tests {
     }
 
     #[test]
+    fn canvas_commands_draw_text_shapes_and_clip_to_layer() {
+        let area = Rect::new(0, 0, 12, 5);
+        let mut buffer = Buffer::empty(area);
+        let palette = Palette {
+            foreground: Color::White,
+            background: Color::Black,
+            accent: Color::Cyan,
+            muted: Color::Gray,
+            highlight: Color::DarkGray,
+            playing: Color::Green,
+            border: Color::Gray,
+        };
+        let commands = vec![
+            serde_json::json!({"op":"fill","x":1,"y":1,"width":4,"height":2,"symbol":"."}),
+            serde_json::json!({"op":"text","x":2,"y":1,"text":"hello","fg":"cyan"}),
+            serde_json::json!({"op":"rect","x":0,"y":0,"width":12,"height":5}),
+            serde_json::json!({"op":"text","x":50,"y":50,"text":"outside"}),
+        ];
+        render_canvas_commands(&mut buffer, area, palette, &commands);
+        assert_eq!(buffer[(2, 1)].symbol(), "h");
+        assert_eq!(buffer[(1, 2)].symbol(), ".");
+        assert_eq!(buffer[(0, 0)].symbol(), "┌");
+        assert_eq!(buffer[(11, 4)].symbol(), "┘");
+    }
+
+    #[test]
+    fn canvas_area_accepts_percent_geometry() {
+        let area = canvas_area(
+            &serde_json::json!({
+                "x": "10%",
+                "y": "20%",
+                "width": "50%",
+                "height": "40%"
+            }),
+            Rect::new(0, 0, 100, 50),
+        );
+        assert_eq!(area, Rect::new(10, 10, 50, 20));
+    }
+
+    #[test]
     fn modules_command_lists_info_and_toggles_modules() {
         let temp = tempdir().unwrap();
         let paths = AppPaths {
@@ -3044,6 +3617,60 @@ mod tests {
             .unwrap();
         assert!(app.receive_module_outputs());
         assert!(app.module_widget.is_none());
+    }
+
+    #[test]
+    fn canvas_outputs_are_composited_and_can_be_cleared() {
+        let temp = tempdir().unwrap();
+        let paths = AppPaths {
+            config_dir: temp.path().join("config"),
+            settings_file: temp.path().join("config/settings.json"),
+            data_dir: temp.path().join("data"),
+            songs_dir: temp.path().join("data/songs"),
+            cache_dir: temp.path().join("cache"),
+        };
+        let mut app = App::new(paths, Settings::default(), Vec::new());
+        app.module_runtime
+            .output_sender()
+            .send(crate::modules::ModuleOutput {
+                module: "canvas".into(),
+                kind: "canvas".into(),
+                title: String::new(),
+                text: String::new(),
+                lines: Vec::new(),
+                value: 0.0,
+                max: 0.0,
+                data: serde_json::json!({
+                    "type": "canvas",
+                    "id": "hud",
+                    "z": 4,
+                    "commands": [{"op":"text","x":1,"y":1,"text":"hud"}]
+                }),
+                flush: true,
+                widget: None,
+            })
+            .unwrap();
+        assert!(app.receive_module_outputs());
+        assert_eq!(app.module_canvases.len(), 1);
+        assert_eq!(app.active_modal_canvas(), None);
+
+        app.module_runtime
+            .output_sender()
+            .send(crate::modules::ModuleOutput {
+                module: "canvas".into(),
+                kind: "canvas".into(),
+                title: String::new(),
+                text: String::new(),
+                lines: Vec::new(),
+                value: 0.0,
+                max: 0.0,
+                data: serde_json::json!({"type":"canvas","id":"hud","clear":true}),
+                flush: true,
+                widget: None,
+            })
+            .unwrap();
+        assert!(app.receive_module_outputs());
+        assert!(app.module_canvases.is_empty());
     }
 
     #[test]

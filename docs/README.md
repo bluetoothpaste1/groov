@@ -10,6 +10,7 @@
 - [Руководство разработчика](DEVELOPMENT.md) — устройство исходников, сборка, тесты, изменение API и обязательные правила обновления документации.
 - [Архитектурные решения](ARCHITECTURE.md) — долговечные контракты хранения, расширений, рендера и выбора языка.
 - [`basic_modules`](../basic_modules/) — готовые out-of-tree примеры `flame`, `easyadd` и `speedr`.
+- [`canvas_overlay`](../examples/modules/canvas_overlay/) — canvas HUD, z-layer и modal drawing example.
 - [Changelog](../CHANGELOG.md) — история релизов и release notes.
 - [License](../LICENSE) — лицензия MIT.
 
