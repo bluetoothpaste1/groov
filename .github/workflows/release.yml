@@ -37,7 +37,7 @@ jobs:
           cp LICENSE README.md CHANGELOG.md "dist/${package}/"
           cp packaging/groov.1 "dist/${package}/"
           chmod 755 "dist/${package}/groov"
-          tar -C dist -czf "${package}.tar.gz" "${package}"
+          tar -C dist -czf "dist/${package}.tar.gz" "${package}"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
