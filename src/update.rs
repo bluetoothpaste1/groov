@@ -248,6 +248,7 @@ fn select_asset<'a>(release: &'a Value, tag: &str) -> Option<&'a Value> {
         "linux" => "linux-x86_64",
         other => other,
     };
+    let arch = platform_arch();
     release
         .get("assets")
         .and_then(Value::as_array)
@@ -259,9 +260,16 @@ fn select_asset<'a>(release: &'a Value, tag: &str) -> Option<&'a Value> {
                 name.ends_with(".tar.gz")
                     && name.contains(&format!("groov-{tag}-"))
                     && name.contains(os)
-                    && name.contains(env::consts::ARCH)
+                    && name.contains(arch)
             })
         })
+}
+
+fn platform_arch() -> &'static str {
+    match (env::consts::OS, env::consts::ARCH) {
+        ("macos", "aarch64") => "arm64",
+        (_, arch) => arch,
+    }
 }
 
 fn checksum_asset<'a>(release: &'a Value, archive: &str) -> Option<&'a str> {
@@ -438,7 +446,7 @@ fn run_command_output(
 
 #[cfg(test)]
 mod tests {
-    use super::{expected_checksum, parse_options, select_asset, Source};
+    use super::{expected_checksum, parse_options, platform_arch, select_asset, Source};
     use serde_json::json;
 
     #[test]
@@ -456,7 +464,7 @@ mod tests {
         let release = json!({
             "assets": [
                 {"name":"groov-v1.5.0-other-x86_64.tar.gz"},
-                {"name": format!("groov-{tag}-{}-{}.tar.gz", if cfg!(target_os = "macos") { "macos" } else { "linux-x86_64" }, std::env::consts::ARCH)}
+                {"name": format!("groov-{tag}-{}-{}.tar.gz", if cfg!(target_os = "macos") { "macos" } else { "linux-x86_64" }, platform_arch())}
             ]
         });
         assert!(select_asset(&release, tag).is_some());
