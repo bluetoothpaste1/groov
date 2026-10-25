@@ -26,6 +26,8 @@ groov modules remove NAME          удалить модуль
 groov theme list                   список тем
 groov doctor                       диагностика
 groov uninstall                    удалить все данные после подтверждения
+groov update                       обновить checkout или binary из GitHub release
+groov update --check               только проверить наличие обновления
 make docs-check                    проверить ссылки и code fences
 make release                       собрать release binary
 make install PREFIX=~/.local       установить binary и man page

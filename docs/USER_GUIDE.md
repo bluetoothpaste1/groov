@@ -413,6 +413,25 @@ groov modules enable speedr
 
 `groov module add DIRECTORY` — короткий алиас для `modules install`. Удаление выполняется через `groov modules remove NAME`, а временное выключение — через `groov modules disable NAME`; вернуть модуль можно командой `groov modules enable NAME`.
 
+## Обновление groov
+
+Если groov запущен из клонированного репозитория, выполните:
+
+```sh
+groov update
+```
+
+Команда проверит чистоту checkout, скачает новые коммиты и теги, выполнит fast-forward-only обновление и пересоберёт binary. Незакоммиченные изменения не перезаписываются: команда остановится и попросит сделать commit или stash.
+
+Для установленного binary, когда рядом нет checkout, используйте GitHub release:
+
+```sh
+groov update --source release
+groov update --check
+```
+
+Release обновляется атомарно после проверки платформенного архива и checksum. `--check` только показывает доступную версию. В обоих сценариях XDG-настройки, модули, темы, кэш, аудиофайлы и metadata остаются на месте. Если binary установлен в каталог, недоступный для записи текущему пользователю, запустите `install.sh` с нужным `PREFIX` или используйте checkout-режим.
+
 ## Темы
 
 Встроенные темы:

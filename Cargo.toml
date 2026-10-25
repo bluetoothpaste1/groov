@@ -1,10 +1,10 @@
 [package]
 name = "groov"
-version = "1.0.0"
+version = "1.5.0"
 edition = "2021"
 description = "A portable, extensible terminal music player"
 license = "MIT"
-repository = "https://github.com/skripsaha/groov"
+repository = "https://github.com/bluetoothpaste1/groov"
 readme = "README.md"
 keywords = ["terminal", "music", "player", "tui", "plugins"]
 categories = ["command-line-utilities", "multimedia::audio"]

@@ -2,7 +2,7 @@
 
 `groov` is a local music player for people who prefer a keyboard. It is a Vim-like TUI with a directory-based library, tag filters, cover art, a configurable audio backend, named themes, and a language-independent module API. The screen is rendered through Ratatui's buffered diff renderer, so unchanged cells are not rewritten on every timer tick.
 
-Current release: `1.0.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes and [LICENSE](LICENSE) for the MIT license.
+Current release: `1.5.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes and [LICENSE](LICENSE) for the MIT license.
 
 <p align="center">
   <img src="screenshots/20261025143906.jpg" alt="groov normal mode (speedr module)" width="49%">
@@ -80,6 +80,8 @@ make
 The project CI checks Rust on Linux and macOS, documentation links, formatting, clippy, tests, and release builds.
 
 Tagged builds use the `vX.Y.Z` convention. GitHub Actions packages Linux and macOS release archives with the architecture in the filename.
+
+To update a checkout without cloning it again, run `groov update` from the repository. It fetches tags, performs a fast-forward-only update, and rebuilds the binary. An installed binary can use `groov update --source release` to download the latest GitHub release. `groov update --check` only reports availability; settings, modules, themes, cache, and the song library stay in their XDG directories.
 
 The application is implemented in Rust; audio playback and optional extensions remain separate external processes.
 

@@ -12,9 +12,9 @@ The first public release of the Rust-based local player.
 - JSONL RPC foundation for module status, overlays, paragraphs, lists, gauges, and redraw messages.
 - Full user, module, configuration, architecture, and development documentation.
 
-## Unreleased
+## 1.5.0 — 2026-10-25
 
-Use this section for changes after 1.0.0. Every behavior change must update the documentation and tests in the same change.
+The 1.5 release expands modules into a full terminal extension platform and adds safe self-update workflows.
 
 - Added host-driven animations up to 240 FPS, retained canvas patches, and configurable session `tick` requests to avoid JSONL round-trips on every frame.
 - Added composited RPC canvas layers with text, colors, shapes, z-order, percentage geometry, modal input, and a direct-terminal mode for independent module UIs.
@@ -32,3 +32,8 @@ Use this section for changes after 1.0.0. Every behavior change must update the 
 - Added the generic `{player_ipc}` / `GROOV_PLAYER_IPC` backend-control contract and an mpv live path for speedr, avoiding process restarts during adjustments.
 - Made mpv the preferred default backend when available, installed speedr automatically from `install.sh`, and kept ffplay as an automatic compatibility fallback.
 - Simplified the build and installation path to the Rust application target.
+- Added `groov update` for fast-forwarding checkouts and atomically installing GitHub release binaries while preserving user data.
+
+## Unreleased
+
+Future changes go here. Every behavior change must update the documentation and tests in the same change.

@@ -164,8 +164,18 @@ fn cli_reports_the_release_version() {
     assert!(version.status.success());
     assert_eq!(
         String::from_utf8_lossy(&version.stdout).trim(),
-        "groov 1.0.0"
+        "groov 1.5.0"
     );
+}
+
+#[test]
+fn cli_update_help_describes_safe_sources() {
+    let temp = tempdir().unwrap();
+    let update = run_cli(temp.path(), &["update", "--help"]);
+    assert!(update.status.success(), "update help failed: {:?}", update);
+    let text = String::from_utf8_lossy(&update.stdout);
+    assert!(text.contains("--source auto|checkout|release"));
+    assert!(text.contains("--check"));
 }
 
 #[test]

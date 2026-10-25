@@ -4,6 +4,7 @@ mod modules;
 mod paths;
 mod player;
 mod tui;
+mod update;
 
 use std::env;
 use std::fs;
@@ -40,6 +41,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "uninstall" => uninstall(&paths, args.collect())?,
         "paths" => println!("{}", paths.describe()),
         "doctor" => doctor(&paths)?,
+        "update" => update::run(args.collect())?,
         "theme" | "themes" => theme_command(&paths, args.collect())?,
         "module" | "modules" => modules_command(&paths, args.collect())?,
         "list" => list(&paths, args.collect())?,
@@ -68,6 +70,9 @@ fn print_help() {
     println!("  scan                        validate and count the local library");
     println!("  paths                       print resolved XDG paths");
     println!("  doctor                      show setup and player diagnostics");
+    println!(
+        "  update [options]            update a checkout or install the latest GitHub release"
+    );
     println!("  version                     print the groov version");
     println!("  theme list|install|use      list, install, or activate a color theme");
     println!("  modules [list|install|remove|enable|disable|info] ... manage modules");

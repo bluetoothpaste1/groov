@@ -22,6 +22,7 @@ groov [command] [arguments]
 | `paths` | нет | вывести XDG-пути |
 | `doctor` | нет | вывести диагностику |
 | `version` | нет | вывести версию |
+| `update` | `--check`, `--source auto|checkout|release`, `--no-build` | обновить checkout или установить последний GitHub release |
 | `list` | `--tag TAG` повторяемый, `--json` | список библиотеки |
 | `scan` | нет | проверить библиотеку |
 | `add` | `FILE` и опции импорта | импортировать аудио |
@@ -102,6 +103,20 @@ groov theme use NAME
 ```
 
 При установке имя берётся из top-level `name`, затем из filename stem. Допустимы ASCII-буквы, цифры, `-` и `_`.
+
+### `groov update`
+
+```sh
+groov update
+groov update --check
+groov update --source checkout
+groov update --source release
+groov update --source checkout --no-build
+```
+
+`auto` (по умолчанию) выбирает git checkout, если команда запущена из него или рядом с его `target`; иначе используется GitHub release. Checkout обновляется через `git fetch --tags --prune` и `git merge --ff-only`, поэтому локальная история не переписывается. При незакоммиченных изменениях команда завершается с ошибкой и просит сначала commit/stash.
+
+Для release-режима groov получает последний tagged release, выбирает архив текущей OS/архитектуры, проверяет `SHA256SUMS` при наличии и атомарно заменяет текущий executable через временный файл. `--check` не меняет source, executable или пользовательские данные. Настройки, modules, themes, cache и songs не находятся в checkout update path и не удаляются.
 
 ## TUI modes and commands
 

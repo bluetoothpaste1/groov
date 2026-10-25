@@ -53,6 +53,7 @@ Paths in metadata are relative to the song directory. Missing `Lyrics` or `Image
       "rpc": false,
       "terminal": false,
       "fps": 0,
+      "mouse": false,
       "enabled": true,
       "command": "groov-scrobbler",
       "args": ["{event}", "{id}"],

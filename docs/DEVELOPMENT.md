@@ -269,5 +269,6 @@ External process failures должны стать user-visible status или д�
 8. Проверить CREDITS и dependency changes.
 9. Убедиться, что target/build/cache не попали в patch.
 10. Убедиться, что Cargo.toml version, CHANGELOG.md и packaging/groov.1 согласованы.
+11. Для release проверить `groov update --check`, GitHub archive assets и `SHA256SUMS`.
 
 Tagged releases use the `vX.Y.Z` convention. The release workflow packages Linux and macOS archives with the runner architecture in the filename. Each archive contains the binary, license, README, changelog, and man page.

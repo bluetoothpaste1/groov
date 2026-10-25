@@ -1,4 +1,4 @@
-.TH GROOV 1 "2026-10-24" "groov 1.0.0" "User Commands"
+.TH GROOV 1 "2026-10-25" "groov 1.5.0" "User Commands"
 .SH NAME
 groov \- portable, extensible terminal music player
 .SH SYNOPSIS
@@ -37,6 +37,9 @@ List, install, and activate themes.
 .TP
 .B doctor
 Print paths, player, library, module, theme, repeat, and image diagnostics.
+.TP
+.B update [OPTIONS]
+Update a git checkout with a fast-forward-only fetch and rebuild, or download the latest GitHub release. Use --check, --source auto|checkout|release, and --no-build. User data in XDG directories is preserved.
 .TP
 .B version
 Print the current groov version.
