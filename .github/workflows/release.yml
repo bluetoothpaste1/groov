@@ -55,14 +55,18 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
-          merge-multiple: true
-      - name: Create checksums
-        working-directory: dist
-        run: sha256sum *.tar.gz | awk '{print $1 "  " $2}' > SHA256SUMS
+      - name: Collect archives and create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find dist -type f -name '*.tar.gz' -exec cp {} release/ \;
+          test -n "$(find release -type f -name '*.tar.gz' -print -quit)"
+          (cd release && sha256sum *.tar.gz > SHA256SUMS)
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            dist/*.tar.gz
-            dist/SHA256SUMS
+            release/*.tar.gz
+            release/SHA256SUMS

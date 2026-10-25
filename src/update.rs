@@ -201,6 +201,9 @@ fn update_release(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         .get("name")
         .and_then(Value::as_str)
         .ok_or("release asset has no name")?;
+    if Path::new(name).file_name().and_then(|value| value.to_str()) != Some(name) {
+        return Err("release asset has an unsafe filename".into());
+    }
     let url = asset
         .get("browser_download_url")
         .and_then(Value::as_str)
@@ -262,12 +265,17 @@ fn select_asset<'a>(release: &'a Value, tag: &str) -> Option<&'a Value> {
 }
 
 fn checksum_asset<'a>(release: &'a Value, archive: &str) -> Option<&'a str> {
-    release
-        .get("assets")
-        .and_then(Value::as_array)
-        .and_then(|assets| {
+    let assets = release.get("assets").and_then(Value::as_array)?;
+    assets
+        .iter()
+        .find_map(|asset| {
+            (asset.get("name").and_then(Value::as_str) == Some(&format!("{archive}.sha256")))
+                .then(|| asset.get("browser_download_url").and_then(Value::as_str))
+                .flatten()
+        })
+        .or_else(|| {
             assets.iter().find_map(|asset| {
-                (asset.get("name").and_then(Value::as_str) == Some(&format!("{archive}.sha256")))
+                (asset.get("name").and_then(Value::as_str) == Some("SHA256SUMS"))
                     .then(|| asset.get("browser_download_url").and_then(Value::as_str))
                     .flatten()
             })
@@ -329,11 +337,13 @@ fn curl(url: &str) -> Result<String, Box<dyn std::error::Error>> {
 }
 
 fn verify_checksum(archive: &Path, checksum: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let expected = fs::read_to_string(checksum)?
-        .split_whitespace()
-        .next()
-        .ok_or("checksum file is empty")?
-        .to_ascii_lowercase();
+    let archive_name = archive
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("archive has no valid filename")?;
+    let checksum_text = fs::read_to_string(checksum)?;
+    let expected = expected_checksum(&checksum_text, archive_name)
+        .ok_or("checksum file has no entry for the downloaded archive")?;
     let archive = archive.to_string_lossy();
     let output = if Command::new("shasum").arg("--version").output().is_ok() {
         Command::new("shasum")
@@ -354,6 +364,21 @@ fn verify_checksum(archive: &Path, checksum: &Path) -> Result<(), Box<dyn std::e
         return Err(format!("release checksum mismatch: expected {expected}, got {actual}").into());
     }
     Ok(())
+}
+
+fn expected_checksum(contents: &str, archive_name: &str) -> Option<String> {
+    contents
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            match fields.as_slice() {
+                [hash] if !hash.is_empty() => Some(*hash),
+                [hash, file] if file.trim_start_matches('*') == archive_name => Some(*hash),
+                _ => None,
+            }
+        })
+        .next()
+        .map(str::to_ascii_lowercase)
 }
 
 fn set_executable(path: &Path) -> io::Result<()> {
@@ -413,7 +438,7 @@ fn run_command_output(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_options, select_asset, Source};
+    use super::{expected_checksum, parse_options, select_asset, Source};
     use serde_json::json;
 
     #[test]
@@ -435,5 +460,14 @@ mod tests {
             ]
         });
         assert!(select_asset(&release, tag).is_some());
+    }
+
+    #[test]
+    fn checksum_manifest_selects_the_downloaded_archive() {
+        let contents = "111111  other.tar.gz\nABCDEF  groov-v1.5.0-linux.tar.gz\n";
+        assert_eq!(
+            expected_checksum(contents, "groov-v1.5.0-linux.tar.gz").as_deref(),
+            Some("abcdef")
+        );
     }
 }
