@@ -194,7 +194,7 @@ fn update_release(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         format!(
             "no release archive matches this platform (os={}, arch={})",
             env::consts::OS,
-            env::consts::ARCH
+            platform_arch()
         )
     })?;
     let name = asset
@@ -381,7 +381,14 @@ fn expected_checksum(contents: &str, archive_name: &str) -> Option<String> {
             let fields: Vec<_> = line.split_whitespace().collect();
             match fields.as_slice() {
                 [hash] if !hash.is_empty() => Some(*hash),
-                [hash, file] if file.trim_start_matches('*') == archive_name => Some(*hash),
+                [hash, file]
+                    if Path::new(file.trim_start_matches('*'))
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        == Some(archive_name) =>
+                {
+                    Some(*hash)
+                }
                 _ => None,
             }
         })
@@ -472,7 +479,7 @@ mod tests {
 
     #[test]
     fn checksum_manifest_selects_the_downloaded_archive() {
-        let contents = "111111  other.tar.gz\nABCDEF  groov-v1.5.0-linux.tar.gz\n";
+        let contents = "111111  other.tar.gz\nABCDEF  release/groov-v1.5.0-linux.tar.gz\n";
         assert_eq!(
             expected_checksum(contents, "groov-v1.5.0-linux.tar.gz").as_deref(),
             Some("abcdef")
