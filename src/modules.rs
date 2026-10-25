@@ -5,6 +5,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::config::Settings;
 use crate::library::Song;
@@ -40,6 +41,29 @@ pub struct ModuleCanvas {
     pub clear: bool,
     pub rect: Value,
     pub commands: Vec<Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModuleAnimationFrame {
+    pub at_ms: u64,
+    pub commands: Vec<Value>,
+}
+
+/// A retained, host-timed animation. The module sends the frame table once;
+/// the TUI advances it locally and only writes changed cells to the terminal.
+#[derive(Debug, Clone)]
+pub struct ModuleAnimation {
+    pub module: String,
+    pub id: String,
+    pub z: i32,
+    pub modal: bool,
+    pub opaque: bool,
+    pub clear: bool,
+    pub rect: Value,
+    pub fps: u16,
+    pub looped: bool,
+    pub duration_ms: u64,
+    pub frames: Vec<ModuleAnimationFrame>,
 }
 
 /// A command that temporarily receives the real terminal. This is the escape
@@ -106,6 +130,109 @@ impl ModuleCanvas {
                 .unwrap_or(false),
             rect: source.get("rect").cloned().unwrap_or_else(|| json!({})),
             commands,
+        })
+    }
+}
+
+impl ModuleAnimation {
+    pub(crate) fn from_value(module: &str, value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        let source = object.get("animation").unwrap_or(value);
+        let source = source.as_object()?;
+        let mode = source
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("overlay");
+        let id = source
+            .get("id")
+            .or_else(|| source.get("layer"))
+            .and_then(Value::as_str)
+            .unwrap_or(module)
+            .trim();
+        if id.is_empty() || id.len() > 128 {
+            return None;
+        }
+        let fps = source
+            .get("fps")
+            .and_then(Value::as_u64)
+            .unwrap_or(60)
+            .clamp(1, 240) as u16;
+        let mut frames = source
+            .get("frames")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .take(1024)
+                    .filter_map(|item| {
+                        let object = item.as_object()?;
+                        let commands = object
+                            .get("commands")
+                            .or_else(|| object.get("draw"))
+                            .and_then(Value::as_array)
+                            .map(|commands| commands.iter().take(4096).cloned().collect())
+                            .unwrap_or_default();
+                        Some(ModuleAnimationFrame {
+                            at_ms: object
+                                .get("at_ms")
+                                .or_else(|| object.get("at"))
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0),
+                            commands,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let clear = source
+            .get("clear")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if frames.is_empty() && !clear {
+            return None;
+        }
+        frames.sort_by_key(|frame| frame.at_ms);
+        let frame_interval = 1000_u64 / u64::from(fps).max(1);
+        let duration_ms = source
+            .get("duration_ms")
+            .or_else(|| source.get("duration"))
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| {
+                frames
+                    .last()
+                    .map(|frame| frame.at_ms.saturating_add(frame_interval))
+                    .unwrap_or(frame_interval)
+            })
+            .max(1);
+        Some(Self {
+            module: module.to_string(),
+            id: id.to_string(),
+            z: source
+                .get("z")
+                .and_then(Value::as_i64)
+                .map(|value| value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
+                .unwrap_or(0),
+            modal: source
+                .get("modal")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                || mode.eq_ignore_ascii_case("modal")
+                || mode.eq_ignore_ascii_case("replace"),
+            opaque: source
+                .get("opaque")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                || mode.eq_ignore_ascii_case("replace"),
+            clear,
+            rect: source.get("rect").cloned().unwrap_or_else(|| json!({})),
+            fps,
+            looped: source
+                .get("loop")
+                .or_else(|| source.get("looped"))
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            duration_ms,
+            frames,
         })
     }
 }
@@ -244,6 +371,7 @@ pub struct ModuleRuntime {
     sessions: Arc<Mutex<HashMap<String, Sender<Value>>>>,
     output: Sender<ModuleOutput>,
     paths: AppPaths,
+    last_ticks: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl ModuleRuntime {
@@ -252,6 +380,7 @@ impl ModuleRuntime {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             output,
             paths,
+            last_ticks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -361,6 +490,48 @@ impl ModuleRuntime {
         None
     }
 
+    pub fn has_tick_modules(&self, settings: &Settings) -> bool {
+        settings
+            .modules
+            .iter()
+            .any(|module| module.enabled && module.rpc && module.session && module.fps > 0)
+    }
+
+    pub fn tick(&self, settings: &Settings, now: Instant, frame: u64) {
+        for module in settings.modules.iter().filter(|module| {
+            module.enabled
+                && module.rpc
+                && module.session
+                && module.fps > 0
+                && module_accepts_event(module, "tick")
+        }) {
+            let rate = u64::from(module.fps.clamp(1, 240));
+            let interval = Duration::from_nanos(1_000_000_000 / rate);
+            let due = self.last_ticks.lock().ok().and_then(|mut ticks| {
+                let previous = ticks.get(&module.name).copied();
+                if previous.is_some_and(|previous| now.duration_since(previous) < interval) {
+                    None
+                } else {
+                    ticks.insert(module.name.clone(), now);
+                    Some(previous.map(|previous| now.duration_since(previous).as_millis() as u64))
+                }
+            });
+            if due.is_none() {
+                continue;
+            }
+            let _ = self.send_session(
+                module,
+                json!({
+                    "api_version": 1,
+                    "type": "tick",
+                    "event": "tick",
+                    "frame": frame,
+                    "dt_ms": due.flatten().unwrap_or(interval.as_millis() as u64)
+                }),
+            );
+        }
+    }
+
     pub fn send_input(&self, settings: &Settings, module_name: &str, key: &str) -> bool {
         let Some(module) = settings.modules.iter().find(|module| {
             module.enabled
@@ -385,6 +556,9 @@ impl ModuleRuntime {
     pub fn reset(&self) {
         if let Ok(mut sessions) = self.sessions.lock() {
             sessions.clear();
+        }
+        if let Ok(mut ticks) = self.last_ticks.lock() {
+            ticks.clear();
         }
     }
 
@@ -611,7 +785,21 @@ fn spawn_session(
     let output_for_reader = output.clone();
     thread::spawn(move || {
         let mut stdin = stdin;
-        for request in request_rx {
+        let mut deferred = None;
+        while let Some(mut request) = deferred.take().or_else(|| request_rx.recv().ok()) {
+            if request.get("type").and_then(Value::as_str) == Some("tick") {
+                // A slow module must never accumulate an unbounded queue of
+                // stale frame requests. Keep the newest consecutive tick and
+                // preserve the first non-tick request for the next iteration.
+                while let Ok(next) = request_rx.try_recv() {
+                    if next.get("type").and_then(Value::as_str) == Some("tick") {
+                        request = next;
+                    } else {
+                        deferred = Some(next);
+                        break;
+                    }
+                }
+            }
             if writeln!(stdin, "{}", request)
                 .and_then(|_| stdin.flush())
                 .is_err()
@@ -809,7 +997,9 @@ fn interpolate(value: &str, event: &str, song: Option<&Song>) -> String {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{spawn_rpc, spawn_session, ModuleCanvas, ModuleOutput, ModuleWidgetNode};
+    use super::{
+        spawn_rpc, spawn_session, ModuleAnimation, ModuleCanvas, ModuleOutput, ModuleWidgetNode,
+    };
     use crate::config::{ModuleConfig, Settings};
     use crate::paths::AppPaths;
     use std::sync::mpsc;
@@ -908,6 +1098,27 @@ mod tests {
         assert_eq!(canvas.id, "demo");
         assert!(!canvas.modal);
         assert!(!canvas.opaque);
+    }
+
+    #[test]
+    fn animation_response_is_retained_with_host_timing_metadata() {
+        let value = serde_json::json!({
+            "type": "animation",
+            "id": "spinner",
+            "fps": 120,
+            "loop": true,
+            "duration_ms": 400,
+            "frames": [
+                {"at_ms": 0, "commands": [{"op":"text","id":"glyph","text":"|"}]},
+                {"at_ms": 200, "commands": [{"op":"text","id":"glyph","text":"/"}]}
+            ]
+        });
+        let animation = ModuleAnimation::from_value("demo", &value).unwrap();
+        assert_eq!(animation.id, "spinner");
+        assert_eq!(animation.fps, 120);
+        assert_eq!(animation.duration_ms, 400);
+        assert_eq!(animation.frames.len(), 2);
+        assert_eq!(animation.frames[1].at_ms, 200);
     }
 
     #[test]

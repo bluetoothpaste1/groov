@@ -80,6 +80,35 @@ struct ImageResult {
     protocol: Option<Box<dyn StatefulProtocol>>,
 }
 
+struct ActiveAnimation {
+    animation: modules::ModuleAnimation,
+    started: Instant,
+    frame_index: usize,
+}
+
+enum CanvasLayerRef<'a> {
+    Static(&'a modules::ModuleCanvas),
+    Animated(&'a ActiveAnimation),
+}
+
+impl CanvasLayerRef<'_> {
+    fn z(&self) -> i32 {
+        match self {
+            Self::Static(canvas) => canvas.z,
+            Self::Animated(animation) => animation.animation.z,
+        }
+    }
+
+    fn key(&self) -> String {
+        match self {
+            Self::Static(canvas) => format!("{}::{}", canvas.module, canvas.id),
+            Self::Animated(animation) => {
+                format!("{}::{}", animation.animation.module, animation.animation.id)
+            }
+        }
+    }
+}
+
 struct App {
     paths: AppPaths,
     settings: Settings,
@@ -120,6 +149,7 @@ struct App {
     module_runtime: modules::ModuleRuntime,
     module_widget: Option<modules::ModuleWidgetNode>,
     module_canvases: HashMap<String, modules::ModuleCanvas>,
+    module_animations: HashMap<String, ActiveAnimation>,
     pending_terminal: Option<modules::TerminalCommand>,
     module_border: Option<Color>,
 }
@@ -179,6 +209,7 @@ impl App {
             module_runtime,
             module_widget: None,
             module_canvases: HashMap::new(),
+            module_animations: HashMap::new(),
             pending_terminal: None,
             module_border: None,
         };
@@ -273,7 +304,14 @@ impl App {
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut dirty = true;
+        let mut frame = 0_u64;
         loop {
+            let now = Instant::now();
+            if self.advance_module_animations(now) {
+                dirty = true;
+            }
+            self.module_runtime.tick(&self.settings, now, frame);
+            frame = frame.wrapping_add(1);
             if self.receive_image_results() {
                 dirty = true;
             }
@@ -284,7 +322,7 @@ impl App {
                 terminal.draw(|frame| self.draw(frame))?;
                 dirty = false;
             }
-            if event::poll(Duration::from_millis(self.settings.refresh_ms.max(50)))? {
+            if event::poll(self.module_poll_timeout(now))? {
                 match event::read()? {
                     Event::Key(key) => {
                         if self.handle_key(key) || self.should_quit {
@@ -398,6 +436,56 @@ impl App {
         Ok(())
     }
 
+    fn advance_module_animations(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        for active in self.module_animations.values_mut() {
+            let elapsed = now.duration_since(active.started).as_millis() as u64;
+            let frame_index = if !active.animation.looped && elapsed >= active.animation.duration_ms
+            {
+                active.animation.frames.len().saturating_sub(1)
+            } else {
+                animation_frame_index(&active.animation, elapsed)
+            };
+            if frame_index != active.frame_index {
+                active.frame_index = frame_index;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn module_poll_timeout(&self, now: Instant) -> Duration {
+        let mut timeout = if self.module_animations.is_empty()
+            && !self.module_runtime.has_tick_modules(&self.settings)
+        {
+            Duration::from_millis(self.settings.refresh_ms.max(50))
+        } else {
+            Duration::from_millis(4)
+        };
+        for active in self.module_animations.values() {
+            let elapsed = now.duration_since(active.started).as_millis() as u64;
+            if !active.animation.looped && elapsed >= active.animation.duration_ms {
+                continue;
+            }
+            let interval =
+                Duration::from_nanos(1_000_000_000 / u64::from(active.animation.fps.max(1)));
+            let next_frame = elapsed / interval.as_millis().max(1) as u64 + 1;
+            let deadline = active.started + interval.saturating_mul(next_frame as u32);
+            timeout = timeout.min(deadline.saturating_duration_since(now));
+        }
+        if let Some(rate) = self
+            .settings
+            .modules
+            .iter()
+            .filter(|module| module.enabled && module.rpc && module.session && module.fps > 0)
+            .map(|module| module.fps.clamp(1, 240))
+            .max()
+        {
+            timeout = timeout.min(Duration::from_nanos(1_000_000_000 / u64::from(rate)));
+        }
+        timeout.max(Duration::from_millis(1))
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> bool {
         if self.view_mode == ViewMode::Compact && self.input_mode == InputMode::Normal {
             self.show_help = false;
@@ -501,13 +589,29 @@ impl App {
         self.module_canvases
             .values()
             .filter(|canvas| canvas.modal)
-            .max_by_key(|canvas| (canvas.z, canvas.module.clone(), canvas.id.clone()))
-            .map(|canvas| (canvas.module.clone(), canvas.id.clone()))
+            .map(|canvas| (canvas.z, canvas.module.clone(), canvas.id.clone()))
+            .chain(
+                self.module_animations
+                    .values()
+                    .filter(|animation| animation.animation.modal)
+                    .map(|animation| {
+                        (
+                            animation.animation.z,
+                            animation.animation.module.clone(),
+                            animation.animation.id.clone(),
+                        )
+                    }),
+            )
+            .max_by_key(|candidate| candidate.clone())
+            .map(|(_, module, id)| (module, id))
     }
 
     fn close_modal_canvas(&mut self, module_name: &str) {
         self.module_canvases
             .retain(|_, canvas| canvas.module != module_name || !canvas.modal);
+        self.module_animations.retain(|_, animation| {
+            animation.animation.module != module_name || !animation.animation.modal
+        });
         if self.input_mode == InputMode::Command {
             self.input_mode = InputMode::Normal;
             self.input.clear();
@@ -1211,6 +1315,7 @@ impl App {
                     self.settings = settings;
                     self.module_border = None;
                     self.module_canvases.clear();
+                    self.module_animations.clear();
                     self.configure_image_picker();
                     self.status = "configuration and modules reloaded".into();
                 }
@@ -1718,23 +1823,30 @@ impl App {
 
     fn receive_module_outputs(&mut self) -> bool {
         let mut changed = false;
+        let mut latest_layers = HashMap::new();
         while let Ok(output) = self.module_outputs.try_recv() {
+            if matches!(output.kind.as_str(), "canvas" | "animation") {
+                let layer_id = output
+                    .data
+                    .get("id")
+                    .or_else(|| output.data.get("layer"))
+                    .or_else(|| {
+                        output
+                            .data
+                            .get("animation")
+                            .and_then(|value| value.get("id"))
+                    })
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                latest_layers.insert(
+                    format!("{}::{}::{layer_id}", output.module, output.kind),
+                    output,
+                );
+                continue;
+            }
             changed |= output.flush;
-            if output.kind.eq_ignore_ascii_case("canvas") {
-                if let Some(canvas) =
-                    modules::ModuleCanvas::from_value(&output.module, &output.data)
-                {
-                    let key = format!("{}::{}", canvas.module, canvas.id);
-                    if canvas.clear {
-                        self.module_canvases.remove(&key);
-                    } else {
-                        self.module_canvases.insert(key, canvas);
-                    }
-                    changed = true;
-                } else {
-                    self.status = format!("module {} sent an invalid canvas", output.module);
-                    changed = true;
-                }
+            if output.kind == "canvas_patch" {
+                changed |= self.apply_canvas_patch(&output.module, &output.data);
                 continue;
             }
             match output.kind.as_str() {
@@ -1797,6 +1909,9 @@ impl App {
                     self.module_widget = None;
                     self.module_canvases
                         .retain(|_, canvas| canvas.module != output.module || !canvas.modal);
+                    self.module_animations.retain(|_, animation| {
+                        animation.animation.module != output.module || !animation.animation.modal
+                    });
                 }
                 "playback" => self.handle_module_playback(&output.module, &output.data),
                 "rescan" => match scan(&self.paths) {
@@ -1816,7 +1931,136 @@ impl App {
                 }
             }
         }
+        for output in latest_layers.into_values() {
+            changed |= output.flush;
+            changed |= self.apply_module_layer_output(&output);
+        }
         changed
+    }
+
+    fn apply_module_layer_output(&mut self, output: &modules::ModuleOutput) -> bool {
+        if output.kind == "canvas" {
+            if let Some(canvas) = modules::ModuleCanvas::from_value(&output.module, &output.data) {
+                let key = format!("{}::{}", canvas.module, canvas.id);
+                if canvas.clear {
+                    self.module_canvases.remove(&key);
+                } else {
+                    self.module_animations.remove(&key);
+                    self.module_canvases.insert(key, canvas);
+                }
+            } else {
+                self.status = format!("module {} sent an invalid canvas", output.module);
+            }
+            return true;
+        }
+        if let Some(animation) = modules::ModuleAnimation::from_value(&output.module, &output.data)
+        {
+            let key = format!("{}::{}", animation.module, animation.id);
+            if animation.clear {
+                self.module_animations.remove(&key);
+                self.module_canvases.remove(&key);
+            } else {
+                self.module_canvases.remove(&key);
+                self.module_animations.insert(
+                    key,
+                    ActiveAnimation {
+                        animation,
+                        started: Instant::now(),
+                        frame_index: 0,
+                    },
+                );
+            }
+        } else {
+            self.status = format!("module {} sent an invalid animation", output.module);
+        }
+        true
+    }
+
+    fn apply_canvas_patch(&mut self, module: &str, data: &serde_json::Value) -> bool {
+        let Some(object) = data.as_object() else {
+            self.status = format!("module {module} sent an invalid canvas patch");
+            return true;
+        };
+        let id = object
+            .get("id")
+            .or_else(|| object.get("layer"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(module);
+        if id.is_empty() || id.len() > 128 {
+            self.status = format!("module {module} sent an invalid canvas patch id");
+            return true;
+        }
+        let key = format!("{module}::{id}");
+        if object
+            .get("clear")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            self.module_canvases.remove(&key);
+            return true;
+        }
+        self.module_animations.remove(&key);
+        if !self.module_canvases.contains_key(&key) {
+            let seed = serde_json::json!({
+                "type": "canvas",
+                "id": id,
+                "z": object.get("z").cloned().unwrap_or_else(|| serde_json::json!(0)),
+                "modal": object.get("modal").cloned().unwrap_or(serde_json::json!(false)),
+                "opaque": object.get("opaque").cloned().unwrap_or(serde_json::json!(false)),
+                "rect": object.get("rect").cloned().unwrap_or_else(|| serde_json::json!({})),
+                "commands": []
+            });
+            if let Some(canvas) = modules::ModuleCanvas::from_value(module, &seed) {
+                self.module_canvases.insert(key.clone(), canvas);
+            }
+        }
+        let Some(canvas) = self.module_canvases.get_mut(&key) else {
+            return false;
+        };
+        if let Some(z) = object.get("z").and_then(serde_json::Value::as_i64) {
+            canvas.z = z.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        }
+        if let Some(rect) = object.get("rect") {
+            canvas.rect = rect.clone();
+        }
+        if let Some(modal) = object.get("modal").and_then(serde_json::Value::as_bool) {
+            canvas.modal = modal;
+        }
+        if let Some(opaque) = object.get("opaque").and_then(serde_json::Value::as_bool) {
+            canvas.opaque = opaque;
+        }
+        if let Some(remove) = object.get("remove").and_then(serde_json::Value::as_array) {
+            let remove = remove
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<std::collections::HashSet<_>>();
+            canvas.commands.retain(|command| {
+                command
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(|command_id| !remove.contains(command_id))
+            });
+        }
+        if let Some(updates) = object
+            .get("updates")
+            .or_else(|| object.get("commands"))
+            .and_then(serde_json::Value::as_array)
+        {
+            for update in updates.iter().take(4096) {
+                let Some(update_id) = update.get("id").and_then(serde_json::Value::as_str) else {
+                    canvas.commands.push(update.clone());
+                    continue;
+                };
+                if let Some(existing) = canvas.commands.iter_mut().find(|command| {
+                    command.get("id").and_then(serde_json::Value::as_str) == Some(update_id)
+                }) {
+                    *existing = update.clone();
+                } else if canvas.commands.len() < 4096 {
+                    canvas.commands.push(update.clone());
+                }
+            }
+        }
+        true
     }
 
     fn handle_module_playback(&mut self, module: &str, data: &serde_json::Value) {
@@ -2271,24 +2515,62 @@ impl App {
     }
 
     fn draw_module_canvases(&self, frame: &mut Frame<'_>, palette: Palette) {
-        let mut layers = self.module_canvases.values().collect::<Vec<_>>();
-        layers.sort_by_key(|canvas| (canvas.z, canvas.module.clone(), canvas.id.clone()));
-        for canvas in layers {
-            let area = canvas_area(&canvas.rect, frame.area());
-            if area.width == 0 || area.height == 0 {
-                continue;
+        let mut layers = self
+            .module_canvases
+            .values()
+            .map(CanvasLayerRef::Static)
+            .chain(
+                self.module_animations
+                    .values()
+                    .map(CanvasLayerRef::Animated),
+            )
+            .collect::<Vec<_>>();
+        layers.sort_by_key(|layer| (layer.z(), layer.key()));
+        for layer in layers {
+            match layer {
+                CanvasLayerRef::Static(canvas) => self.draw_canvas_layer(
+                    frame,
+                    palette,
+                    &canvas.rect,
+                    canvas.opaque,
+                    &canvas.commands,
+                ),
+                CanvasLayerRef::Animated(active) => {
+                    let commands = &active.animation.frames[active.frame_index].commands;
+                    self.draw_canvas_layer(
+                        frame,
+                        palette,
+                        &active.animation.rect,
+                        active.animation.opaque,
+                        commands,
+                    );
+                }
             }
-            if canvas.opaque {
-                frame.render_widget(Clear, area);
-                fill_canvas_rect(
-                    frame.buffer_mut(),
-                    area,
-                    Style::default().bg(palette.background),
-                    " ",
-                );
-            }
-            render_canvas_commands(frame.buffer_mut(), area, palette, &canvas.commands);
         }
+    }
+
+    fn draw_canvas_layer(
+        &self,
+        frame: &mut Frame<'_>,
+        palette: Palette,
+        rect: &serde_json::Value,
+        opaque: bool,
+        commands: &[serde_json::Value],
+    ) {
+        let area = canvas_area(rect, frame.area());
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        if opaque {
+            frame.render_widget(Clear, area);
+            fill_canvas_rect(
+                frame.buffer_mut(),
+                area,
+                Style::default().bg(palette.background),
+                " ",
+            );
+        }
+        render_canvas_commands(frame.buffer_mut(), area, palette, commands);
     }
 
     fn render_module_node(
@@ -2446,6 +2728,22 @@ fn parse_color(value: &str, fallback: Color) -> Color {
         "reset" => Color::Reset,
         _ => fallback,
     }
+}
+
+fn animation_frame_index(animation: &modules::ModuleAnimation, elapsed_ms: u64) -> usize {
+    let position = if animation.looped {
+        elapsed_ms % animation.duration_ms.max(1)
+    } else {
+        elapsed_ms.min(animation.duration_ms.saturating_sub(1))
+    };
+    animation
+        .frames
+        .iter()
+        .enumerate()
+        .take_while(|(_, frame)| frame.at_ms <= position)
+        .map(|(index, _)| index)
+        .last()
+        .unwrap_or(0)
 }
 
 fn canvas_area(rect_value: &serde_json::Value, screen: Rect) -> Rect {
@@ -3206,9 +3504,9 @@ fn centered_cover(area: Rect, requested_width: u16, font_size: (u16, u16)) -> Re
 #[cfg(test)]
 mod tests {
     use super::{
-        canvas_area, module_audio_filter, next_visible_queue_position, parse_command_line,
-        previous_visible_queue_position, render_canvas_commands, split_tag_args, App, InputMode,
-        Palette, ViewMode,
+        animation_frame_index, canvas_area, module_audio_filter, next_visible_queue_position,
+        parse_command_line, previous_visible_queue_position, render_canvas_commands,
+        split_tag_args, App, InputMode, Palette, ViewMode,
     };
     use crate::config::Settings;
     use crate::library::{Song, SongInfo};
@@ -3505,6 +3803,28 @@ mod tests {
     }
 
     #[test]
+    fn host_animation_selects_frames_without_rpc_round_trips() {
+        let animation = crate::modules::ModuleAnimation::from_value(
+            "demo",
+            &serde_json::json!({
+                "type":"animation",
+                "id":"pulse",
+                "fps":60,
+                "duration_ms":300,
+                "frames":[
+                    {"at_ms":0,"commands":[]},
+                    {"at_ms":100,"commands":[{"op":"text","text":"one"}]},
+                    {"at_ms":200,"commands":[{"op":"text","text":"two"}]}
+                ]
+            }),
+        )
+        .unwrap();
+        assert_eq!(animation_frame_index(&animation, 0), 0);
+        assert_eq!(animation_frame_index(&animation, 150), 1);
+        assert_eq!(animation_frame_index(&animation, 350), 0);
+    }
+
+    #[test]
     fn modules_command_lists_info_and_toggles_modules() {
         let temp = tempdir().unwrap();
         let paths = AppPaths {
@@ -3653,6 +3973,28 @@ mod tests {
         assert!(app.receive_module_outputs());
         assert_eq!(app.module_canvases.len(), 1);
         assert_eq!(app.active_modal_canvas(), None);
+
+        app.module_runtime
+            .output_sender()
+            .send(crate::modules::ModuleOutput {
+                module: "canvas".into(),
+                kind: "canvas_patch".into(),
+                title: String::new(),
+                text: String::new(),
+                lines: Vec::new(),
+                value: 0.0,
+                max: 0.0,
+                data: serde_json::json!({
+                    "type":"canvas_patch",
+                    "id":"hud",
+                    "updates":[{"id":"label","op":"text","x":1,"y":1,"text":"updated"}]
+                }),
+                flush: true,
+                widget: None,
+            })
+            .unwrap();
+        assert!(app.receive_module_outputs());
+        assert_eq!(app.module_canvases["canvas::hud"].commands.len(), 2);
 
         app.module_runtime
             .output_sender()

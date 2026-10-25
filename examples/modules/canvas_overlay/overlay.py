@@ -83,6 +83,23 @@ def fullscreen():
             ],
         }
     )
+    send(
+        {
+            "type": "animation",
+            "id": "spinner",
+            "z": 110,
+            "fps": 60,
+            "loop": True,
+            "duration_ms": 400,
+            "rect": {"x": "50%", "y": "20%", "width": 1, "height": 1},
+            "frames": [
+                {"at_ms": 0, "commands": [{"op": "text", "id": "glyph", "text": "|"}]},
+                {"at_ms": 100, "commands": [{"op": "text", "id": "glyph", "text": "/"}]},
+                {"at_ms": 200, "commands": [{"op": "text", "id": "glyph", "text": "-"}]},
+                {"at_ms": 300, "commands": [{"op": "text", "id": "glyph", "text": "\\"}]},
+            ],
+        }
+    )
 
 
 for line in sys.stdin:
@@ -99,4 +116,5 @@ for line in sys.stdin:
         fullscreen()
     elif request.get("type") == "input" and request.get("key") in {"escape", "q"}:
         send({"type": "canvas", "id": "panel", "clear": True})
+        send({"type": "animation", "id": "spinner", "clear": True})
         send({"type": "close"})

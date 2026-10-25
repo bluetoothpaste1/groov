@@ -81,6 +81,9 @@ pub struct ModuleConfig {
     /// The host suspends its TUI until the command exits.
     #[serde(default)]
     pub terminal: bool,
+    /// Request host-driven frame ticks for an RPC session (1..240 FPS).
+    #[serde(default)]
+    pub fps: u16,
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
@@ -319,6 +322,15 @@ fn load_module_manifests(paths: &AppPaths, settings: &mut Settings) -> Result<()
             }
             if !existing.rpc {
                 existing.rpc = module.rpc;
+            }
+            if !existing.session {
+                existing.session = module.session;
+            }
+            if !existing.terminal {
+                existing.terminal = module.terminal;
+            }
+            if existing.fps == 0 {
+                existing.fps = module.fps;
             }
             if existing.version.is_empty() {
                 existing.version = module.version;

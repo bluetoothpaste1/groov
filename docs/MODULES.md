@@ -13,6 +13,8 @@
 - хранить любые дополнительные metadata;
 - отправлять JSONL RPC-ответы, из которых groov рендерит status, overlays, paragraphs, lists, gauges и declarative widget trees;
 - рисовать произвольные cell-based canvas layers поверх обычного интерфейса: текст, цвета, заливки, линии, рамки и процентную геометрию;
+- запускать host-driven animations: описание кадров отправляется один раз, а groov исполняет его локально с частотой до 240 FPS;
+- обновлять canvas через маленькие `canvas_patch`-сообщения вместо передачи всего слоя;
 - открывать интерактивные session views, закрывать их и просить groov пересканировать библиотеку;
 - запускать отдельную terminal UI с прямым владением экраном, если host-composited canvas недостаточно;
 - управлять playback через общий `playback` response: перезапускать текущий backend с фильтром, менять позицию, паузу и остановку;
@@ -118,6 +120,7 @@ $XDG_CONFIG_HOME/groov/modules/<module-name>/module.json
   "rpc": true,
   "session": true,
   "terminal": false,
+  "fps": 0,
   "command": "python3",
   "args": ["main.py", "{event}", "{id}"],
   "events": ["play", "stop", "metadata"],
@@ -150,6 +153,7 @@ $XDG_CONFIG_HOME/groov/modules/<module-name>/module.json
 | rpc | boolean | false | включить JSONL request/response protocol |
 | session | boolean | false | держать RPC process живым между сообщениями |
 | terminal | boolean | false | передавать терминал отдельному command alias до его завершения |
+| fps | unsigned integer | `0` | частота host `tick` requests для session-модуля; диапазон 1..240 |
 | command | string или null | null | executable, который запускается |
 | args | array<string> | [] | аргументы event hook |
 | events | array<string> | [] | фильтр событий; пустой список означает все |
@@ -364,6 +368,9 @@ RPC включается явно:
 | gauge | value, max, text, title | progress gauge |
 | view | root или widget | declarative widget tree |
 | palette | border, clear | временно изменить цвет границ или очистить изменение |
+| canvas | id, z, rect, commands, modal, opaque | retained cell-based drawing layer |
+| canvas_patch | id, updates, remove | изменить только named canvas commands |
+| animation | id, fps, duration_ms, loop, frames | host-driven animation без frame-by-frame RPC |
 | playback | action, song_id, offset_seconds, audio_filter | управлять текущим player process |
 | close | нет | закрыть активный module view |
 | rescan | нет | перечитать библиотеку без остановки player |
@@ -485,6 +492,57 @@ RPC-модуль может вернуть `type: "canvas"`. Такой отве
 При `:my-app` groov выключает raw mode и alternate screen, запускает процесс с inherited stdin/stdout/stderr и ждёт его завершения. Процесс получает стандартные `GROOV_*` переменные, включая `GROOV_TERMINAL=1` и `GROOV_PLAYER_IPC`, поэтому может использовать любой собственный terminal UI, мышь, alternate screen и библиотеку виджетов. После выхода groov безопасно восстанавливает свой экран и продолжает playback.
 
 Canvas и terminal mode дополняют друг друга: canvas подходит для overlays, HUD и взаимодействия с библиотекой, terminal mode — для приложения, которому нужен полный контроль над терминалом.
+
+### Host-driven animation
+
+`animation` позволяет отправить таблицу кадров один раз. Host сам выбирает активный кадр по monotonic clock, перерисовывает только изменившиеся terminal cells через Ratatui diff buffer и не ждёт следующий JSONL response. Поэтому session-модулю не нужно запускать `sleep`-поток для простых эффектов:
+
+~~~json
+{
+  "type": "animation",
+  "id": "spinner",
+  "z": 60,
+  "fps": 60,
+  "loop": true,
+  "duration_ms": 400,
+  "rect": {"x": "50%", "y": 2, "width": 1, "height": 1},
+  "frames": [
+    {"at_ms": 0, "commands": [{"op": "text", "id": "glyph", "x": 0, "y": 0, "text": "|"}]},
+    {"at_ms": 100, "commands": [{"op": "text", "id": "glyph", "x": 0, "y": 0, "text": "/"}]},
+    {"at_ms": 200, "commands": [{"op": "text", "id": "glyph", "x": 0, "y": 0, "text": "-"}]},
+    {"at_ms": 300, "commands": [{"op": "text", "id": "glyph", "x": 0, "y": 0, "text": "\\"}]}
+  ]
+}
+~~~
+
+`fps` ограничен диапазоном 1..240, `frames` — 1024 кадрами, а commands каждого кадра — 4096 операциями. `loop: false` оставляет последний кадр после завершения. Отправка нового animation с тем же `id` заменяет старый; `clear: true` удаляет слой.
+
+### Incremental canvas patches
+
+Для динамических данных, которые нельзя описать заранее, сначала отправьте обычный `canvas`, а затем меняйте только именованные команды:
+
+~~~json
+{
+  "type": "canvas_patch",
+  "id": "hud",
+  "updates": [
+    {"id": "score", "op": "text", "x": 2, "y": 1, "text": "score: 42"}
+  ],
+  "remove": ["old-message"]
+}
+~~~
+
+`updates` заменяет команду с тем же `id` или добавляет новую, `remove` удаляет команды. Host сохраняет слой между кадрами, поэтому модулю не нужно повторно отправлять фон, рамки и неизменившиеся элементы.
+
+### Host frame ticks
+
+Session-модуль может указать в manifest `"fps": 60`. Host будет отправлять ему request:
+
+~~~json
+{"api_version":1,"type":"tick","event":"tick","frame":42,"dt_ms":16}
+~~~
+
+Модуль может использовать tick для физики, сетевых данных и интерактивных эффектов, а затем отправлять `canvas_patch`. `animation` предпочтительнее для заранее известных кадров: в этом случае между host и модулем нет JSONL round-trip на каждый кадр. Tick requests учитывают `events`; если events перечислены, добавьте `"tick"` или оставьте массив пустым.
 
 ## Примеры реализации
 

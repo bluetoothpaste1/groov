@@ -305,7 +305,7 @@ stdin, stdout и stderr процесса изолированы. Пауза/пр
 
 Если module field `rpc` равен true, stdin/stdout используются JSONL protocol. При `session: true` один process принимает последовательность requests, включая input/key messages; request/response schema и declarative widgets описаны в [MODULES.md](MODULES.md).
 
-RPC response `type: "canvas"` рисует cell-based слой поверх host UI. Слой имеет `id`, `z`, `modal`, `opaque`, `rect` и `commands`; полный список операций и пример находятся в [MODULES.md](MODULES.md). Manifest field `terminal: true` передаёт указанный command alias отдельному процессу с inherited stdin/stdout/stderr, чтобы модуль мог запустить собственный Ratatui/crossterm UI.
+RPC response `type: "canvas"` рисует cell-based слой поверх host UI. `canvas_patch` обновляет только named commands, а `animation` передаёт host таблицу кадров для локального frame loop. Полный список операций и примеры находятся в [MODULES.md](MODULES.md). Manifest field `terminal: true` передаёт указанный command alias отдельному процессу с inherited stdin/stdout/stderr, чтобы модуль мог запустить собственный Ratatui/crossterm UI; `fps` включает host `tick` requests для session-модулей.
 
 `GROOV_EVENT_JSON` сейчас содержит:
 
