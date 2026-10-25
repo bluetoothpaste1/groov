@@ -10,20 +10,21 @@ groov — локальный музыкальный плеер для терми
 
 Поиск и справка не являются отдельными режимами: поиск выполняется командой `search`, а справка открывается временной панелью. Это упрощает настройку и расширение поведения.
 
-Воспроизведение передаётся внешней программе. По умолчанию используется `ffplay`, но команду можно заменить на любой backend, который принимает путь к файлу.
+Воспроизведение передаётся внешней программе. При наличии `mpv` groov выбирает его как backend по умолчанию: это даёт speedr live-контроль без перезапуска трека. Если mpv не установлен, новые настройки используют совместимый `ffplay` fallback.
 
 ## Установка зависимостей
 
 Для сборки нужны:
 
 - Rust и Cargo;
-- FFmpeg (`ffplay`) для воспроизведения;
+- mpv для рекомендованного live-воспроизведения;
+- FFmpeg (`ffplay`) как fallback;
 - FFmpeg (`ffprobe`) необязателен, но позволяет автоматически читать title, artist, album и duration.
 
 На macOS:
 
 ```sh
-brew install ffmpeg python
+brew install ffmpeg mpv python
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 . "$HOME/.cargo/env"
 ```
@@ -32,12 +33,12 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 ```sh
 sudo apt update
-sudo apt install --yes ffmpeg python3
+sudo apt install --yes ffmpeg mpv python3
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 . "$HOME/.cargo/env"
 ```
 
-Если `rustc --version` и `cargo --version` уже работают, установщик Rust повторно запускать не нужно. `ffprobe` необязателен, а Python 3 нужен только для примеров `basic_modules`. Если macOS сообщает об отсутствующем linker или `cc`, установите только Command Line Tools: `xcode-select --install`; полное приложение Xcode не требуется.
+Если `rustc --version` и `cargo --version` уже работают, установщик Rust повторно запускать не нужно. `ffprobe` необязателен, а Python 3 нужен для speedr и других Python-модулей. Если macOS сообщает об отсутствующем linker или `cc`, установите только Command Line Tools: `xcode-select --install`; полное приложение Xcode не требуется.
 
 Сборка:
 
@@ -69,6 +70,7 @@ PREFIX="$HOME/.local" ./install.sh
 ```
 
 Скрипт собирает release binary и устанавливает man page без `sudo`, если используется пользовательский prefix.
+Если рядом с checkout есть `basic_modules/speedr`, скрипт также устанавливает и включает этот модуль в пользовательском module directory. При наличии mpv новые настройки используют live IPC backend; без mpv groov оставляет ffplay fallback.
 
 После установки добавьте `$HOME/.local/bin` в `PATH`, если его там ещё нет:
 
@@ -400,9 +402,13 @@ COMMAND отображается с префиксом `:`. Значения в 
 ```sh
 groov modules install basic_modules/flame
 groov modules install basic_modules/easyadd
+groov modules install basic_modules/speedr
 groov modules enable flame
 groov modules enable easyadd
+groov modules enable speedr
 ```
+
+`speedr` устанавливается и включается installer-ом. Он открывается командой `:speedr` или клавишей `s` и показывает шкалы speed/pitch от 0 до 100. Значение 50 — нейтральное; шкала speed соответствует 0.5–2x, а pitch — -12…+12 полутонам. Используйте `j/k` для выбора шкалы и `h/l` для изменения; активная шкала отмечена `▸`. Шаг по умолчанию равен 5 и меняется через `:speedr step N` или `speedr.json`. При mpv IPC изменения применяются без перезапуска; в fallback-режиме они объединяются после короткой паузы.
 
 `groov module add DIRECTORY` — короткий алиас для `modules install`. Удаление выполняется через `groov modules remove NAME`, а временное выключение — через `groov modules disable NAME`; вернуть модуль можно командой `groov modules enable NAME`.
 
@@ -479,14 +485,16 @@ TUI-команда:
 
 ```json
 {
-  "player_command": "ffplay -nodisp -autoexit -loglevel quiet {file}"
+  "player_command": "mpv --no-video --no-terminal --audio-pitch-correction=yes --input-ipc-server={player_ipc} {file}"
 }
 ```
 
 Поддерживаются placeholders:
 
 - `{file}` — shell-quoted путь к треку;
-- `{start}` — начальная позиция в секундах.
+- `{start}` — начальная позиция в секундах;
+- `{audio_filter}` — отдельный аргумент `-af 'FILTER'` от playback-модулей или пустая строка;
+- `{player_ipc}` — путь к локальному IPC endpoint для backend с live-контролем.
 
 Если `{file}` отсутствует, groov добавит путь в конец команды. Для seek у стандартного `ffplay` groov автоматически добавляет `-ss`, если в команде нет `{start}`.
 
@@ -511,6 +519,8 @@ groov theme list
 ```sh
 command -v ffplay
 ffplay -version
+command -v mpv
+mpv --version
 groov doctor
 ```
 

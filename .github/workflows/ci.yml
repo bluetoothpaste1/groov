@@ -26,6 +26,8 @@ jobs:
         run: cargo +stable clippy --all-targets --locked -- -D warnings
       - name: Tests
         run: cargo +stable test --locked
+      - name: Module tests
+        run: python3 basic_modules/speedr/test_speedr.py
       - name: Release build
         run: cargo +stable build --release --locked
       - name: Package check

@@ -69,6 +69,11 @@ impl AppPaths {
         self.songs_dir.join(id)
     }
 
+    /// Stable local IPC endpoint passed to backends that support live control.
+    pub fn player_ipc_path(&self) -> PathBuf {
+        self.cache_dir.join("player.sock")
+    }
+
     pub fn describe(&self) -> String {
         format!(
             "config  {}\ndata    {}\nsongs   {}\ncache   {}",
@@ -100,6 +105,10 @@ mod tests {
         assert_eq!(
             paths.song_dir("13"),
             std::path::Path::new("/tmp/data/groov/songs/13")
+        );
+        assert_eq!(
+            paths.player_ipc_path(),
+            std::path::Path::new("/tmp/cache/groov/player.sock")
         );
     }
 }

@@ -1,0 +1,18 @@
+{
+  "name": "speedr",
+  "version": "1.0.0",
+  "description": "Live speed and pitch controls for the playing track.",
+  "author": "groov contributors",
+  "enabled": true,
+  "rpc": true,
+  "session": true,
+  "command": "python3",
+  "args": ["speedr.py"],
+  "events": ["play", "stop", "command:speedr"],
+  "commands": [
+    { "name": "speedr", "args": [] }
+  ],
+  "keys": {
+    "s": "speedr"
+  }
+}

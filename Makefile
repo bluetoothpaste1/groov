@@ -5,7 +5,7 @@ MANDIR ?= $(PREFIX)/share/man/man1
 
 RUST_APP := target/debug/groov
 
-.PHONY: all build release install uninstall clean run test docs-check
+.PHONY: all build release install uninstall clean run test module-tests docs-check
 
 all: build
 
@@ -30,6 +30,10 @@ uninstall:
 
 test:
 	$(CARGO) test --locked
+	$(MAKE) module-tests
+
+module-tests:
+	python3 basic_modules/speedr/test_speedr.py
 
 docs-check:
 	python3 scripts/check_docs.py

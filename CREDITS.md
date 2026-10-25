@@ -9,6 +9,6 @@ groov does not copy source code from the projects below. It uses their published
 - [Ratatui](https://ratatui.rs/) for buffered, diff-based terminal rendering.
 - [ratatui-image](https://github.com/ratatui/ratatui-image) for terminal image protocol detection and image widgets.
 - [Neovim's UI event protocol](https://github.com/neovim/neovim/blob/master/runtime/doc/api-ui-events.txt) as an architectural reference for grid-based redraws; no Neovim source code is copied.
-- [FFmpeg](https://ffmpeg.org/), specifically `ffplay`, as the default external audio player when installed.
+- [mpv](https://mpv.io/) as the preferred live-controlled external audio player, with [FFmpeg](https://ffmpeg.org/) `ffplay` as the compatibility fallback.
 
 Each dependency remains under its upstream license. See `Cargo.lock` and the dependency license files for exact versions and notices.

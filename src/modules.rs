@@ -606,6 +606,7 @@ fn set_paths_env(process: &mut Command, paths: Option<&AppPaths>) {
     process.env("GROOV_DATA_DIR", &paths.data_dir);
     process.env("GROOV_SONGS_DIR", &paths.songs_dir);
     process.env("GROOV_CACHE_DIR", &paths.cache_dir);
+    process.env("GROOV_PLAYER_IPC", paths.player_ipc_path());
 }
 
 fn spawn_detached(mut process: Command) -> std::io::Result<()> {

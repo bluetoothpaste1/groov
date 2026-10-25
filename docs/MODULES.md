@@ -13,6 +13,7 @@
 - хранить любые дополнительные metadata;
 - отправлять JSONL RPC-ответы, из которых groov рендерит status, overlays, paragraphs, lists, gauges и declarative widget trees;
 - открывать интерактивные session views, закрывать их и просить groov пересканировать библиотеку;
+- управлять playback через общий `playback` response: перезапускать текущий backend с фильтром, менять позицию, паузу и остановку;
 - временно менять цвет границ через `palette` response;
 - включаться, выключаться и перечитываться без перезапуска groov.
 
@@ -86,7 +87,7 @@ groov modules info hello
 
 Готовый минимальный пример находится в examples/modules/hello.
 
-Полноценные out-of-tree examples находятся в `basic_modules/`: `flame` демонстрирует streaming palette updates, а `easyadd` — interactive session view, input handling, atomic library writes и rescan request.
+Полноценные out-of-tree examples находятся в `basic_modules/`: `flame` демонстрирует streaming palette updates, `easyadd` — interactive session view, input handling, atomic library writes и rescan request, а `speedr` — generic playback control через audio filter или live IPC backend.
 
 ## Где groov ищет модули
 
@@ -266,6 +267,7 @@ GROOV_SETTINGS_FILE=/path/to/config/groov/settings.json
 GROOV_DATA_DIR=/path/to/data/groov
 GROOV_SONGS_DIR=/path/to/data/groov/songs
 GROOV_CACHE_DIR=/path/to/cache/groov
+GROOV_PLAYER_IPC=/path/to/cache/groov/player.sock
 ~~~
 
 GROOV_SONG_ID и GROOV_SONG_FILE не устанавливаются, если song context отсутствует. GROOV_EVENT_JSON всегда содержит как минимум event.
@@ -358,6 +360,7 @@ RPC включается явно:
 | gauge | value, max, text, title | progress gauge |
 | view | root или widget | declarative widget tree |
 | palette | border, clear | временно изменить цвет границ или очистить изменение |
+| playback | action, song_id, offset_seconds, audio_filter | управлять текущим player process |
 | close | нет | закрыть активный module view |
 | rescan | нет | перечитать библиотеку без остановки player |
 | redraw | нет | запросить новый render pass |
@@ -387,6 +390,41 @@ for line in sys.stdin:
 `palette` сейчас принимает цвет `border` в шестизначном hex или базовом имени; `clear: true` возвращает цвет из активной темы. Неизвестные response types не ломают groov: они превращаются в диагностическое сообщение, а unknown fields сохраняются в parsed data. Это оставляет пространство для новых declarative widgets без поломки старого host.
 
 При session: true процесс запускается один раз, принимает последовательность JSON requests и может отправлять streaming response lines. Request type input используется для передачи key events активному view. Session-модуль должен закрыть stdin и завершиться при остановке host.
+
+В открытом module view host сохраняет общую модель ввода: `:` переключает TUI в COMMAND mode, а `:q`/`:close` закрывает view. `Esc` остаётся коротким отменяющим жестом. Модуль получает остальные клавиши через обычный `input` request и не обязан резервировать собственные варианты выхода.
+
+### Управление playback
+
+Модуль может вернуть `{"type":"playback", ...}`. Это общий контракт host, поэтому модулю не нужен доступ к PID player process и не нужно запускать второй проигрыватель. Все действия проверяются относительно текущего трека; поле `song_id` можно добавить как защиту от устаревшего ответа.
+
+Поддерживаемые `action`:
+
+| action | Поля | Поведение |
+|---|---|---|
+| `restart` | `song_id`, `offset_seconds`, `audio_filter` | перезапустить текущий трек; по умолчанию сохранить текущую позицию и активный фильтр |
+| `set_filter` | `audio_filter` | применить фильтр с текущей позиции |
+| `clear_filter` или `reset` | — | убрать фильтр и перезапустить текущий трек |
+| `seek` | `offset_seconds`, `audio_filter` | перезапустить с указанной позиции |
+| `pause` | — | поставить текущий backend на паузу |
+| `resume` | — | продолжить текущий backend |
+| `stop` | — | остановить воспроизведение |
+
+`audio_filter` — строка фильтра для настроенного аудиобэкенда, максимум 4096 байт; host передаёт её как один shell-quoted аргумент. Для стандартного `ffplay` groov добавляет `-af` автоматически. Значения с переводами строк и NUL отклоняются. Модуль должен сам выбрать синтаксис, который поддерживает backend; например, speed/pitch-модуль может собрать цепочку FFmpeg `atempo`/`asetrate`, а эквалайзер — свою цепочку.
+
+Для настоящего live-контроля backend может использовать `{player_ipc}` в `player_command`. Groov передаёт тот же путь модулю как `GROOV_PLAYER_IPC`; модуль сам говорит с endpoint в протоколе выбранного backend. Это позволяет сохранить общий API и не перезапускать процесс при каждом изменении параметра.
+
+Пример независимого от конкретного модуля ответа:
+
+~~~json
+{
+  "type": "playback",
+  "action": "restart",
+  "song_id": "13",
+  "audio_filter": "atempo=0.82,volume=1.1"
+}
+~~~
+
+Если модуль использует собственную команду backend вместо стандартного `ffplay`, добавьте `{audio_filter}` отдельным аргументом в `player_command` в место, где должны появляться параметры фильтра. Placeholder раскрывается в `-af 'FILTER'` при активном фильтре и в пустую строку без фильтра. Без этого placeholder фильтр можно использовать только с командой, содержащей `ffplay`.
 
 Widget tree поддерживает paragraph, list, gauge, row, column, stack и вложенные children с flex/direction. Это declarative слой поверх Ratatui: host остаётся владельцем terminal buffer, layout и lifecycle, а модуль владеет данными и состоянием view.
 

@@ -95,6 +95,7 @@ struct App {
     status: String,
     pending_g: bool,
     player: Option<Child>,
+    audio_filter: Option<String>,
     playing: Option<usize>,
     playback_started: Option<Instant>,
     playback_offset_seconds: u64,
@@ -151,6 +152,7 @@ impl App {
             status: "ready".into(),
             pending_g: false,
             player: None,
+            audio_filter: None,
             playing: None,
             playback_started: None,
             playback_offset_seconds: 0,
@@ -335,18 +337,44 @@ impl App {
             self.module_info = None;
             self.module_widget = None;
         }
-        if let Some(widget) = self.module_widget.as_ref() {
-            if self
-                .module_runtime
-                .send_input(&self.settings, &widget.module, &key_name(&key))
+        if self.module_widget.is_some() && self.input_mode == InputMode::Normal {
+            if key.code == KeyCode::Esc
+                || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c'))
             {
+                self.close_module_view();
                 return false;
             }
-            self.module_widget = None;
+            if key.code == KeyCode::Char(':') {
+                self.input_mode = InputMode::Command;
+                self.input.clear();
+                self.input_prefix = ':';
+                return false;
+            }
+            let module_name = self
+                .module_widget
+                .as_ref()
+                .map(|widget| widget.module.clone())
+                .unwrap_or_default();
+            if !self
+                .module_runtime
+                .send_input(&self.settings, &module_name, &key_name(&key))
+            {
+                self.close_module_view();
+            }
             return false;
         }
-        if self.module_info.is_some() {
-            self.module_info = None;
+        if self.module_info.is_some() && self.input_mode == InputMode::Normal {
+            if key.code == KeyCode::Esc {
+                self.close_module_view();
+                return false;
+            }
+            if key.code == KeyCode::Char(':') {
+                self.input_mode = InputMode::Command;
+                self.input.clear();
+                self.input_prefix = ':';
+                return false;
+            }
+            self.close_module_view();
             return false;
         }
         if self.show_help {
@@ -357,6 +385,16 @@ impl App {
             InputMode::Normal => self.handle_normal(key),
             InputMode::Command => self.handle_input(key),
         }
+    }
+
+    fn close_module_view(&mut self) {
+        if let Some(widget) = self.module_widget.as_ref() {
+            let _ = self
+                .module_runtime
+                .send_input(&self.settings, &widget.module, "escape");
+        }
+        self.module_widget = None;
+        self.module_info = None;
     }
 
     fn handle_normal(&mut self, key: KeyEvent) -> bool {
@@ -410,7 +448,10 @@ impl App {
             return false;
         }
         match key.code {
-            KeyCode::Esc => true,
+            KeyCode::Esc => {
+                self.pending_g = false;
+                false
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 self.move_selection(1);
                 false
@@ -683,13 +724,38 @@ impl App {
     }
 
     fn start_song_at(&mut self, index: usize, offset_seconds: u64) {
+        let audio_filter = self.audio_filter.clone();
+        self.start_song_at_with_filter(index, offset_seconds, audio_filter);
+    }
+
+    fn start_song_at_with_filter(
+        &mut self,
+        index: usize,
+        offset_seconds: u64,
+        audio_filter: Option<String>,
+    ) {
         player::stop(&mut self.player);
         self.paused = false;
         self.paused_at = None;
         let song = &self.songs[index];
-        match player::start(&self.settings, &song.audio, offset_seconds) {
+        let player_ipc = self.paths.player_ipc_path();
+        let player = if self.settings.player_command.contains("{player_ipc}") {
+            player::start_with_filter_and_control(
+                &self.settings,
+                &song.audio,
+                offset_seconds,
+                audio_filter.as_deref(),
+                Some(&player_ipc),
+            )
+        } else if let Some(filter) = audio_filter.as_deref() {
+            player::start_with_filter(&self.settings, &song.audio, offset_seconds, Some(filter))
+        } else {
+            player::start(&self.settings, &song.audio, offset_seconds)
+        };
+        match player {
             Ok(child) => {
                 self.player = Some(child);
+                self.audio_filter = audio_filter;
                 self.playing = Some(index);
                 if self.follow_playback {
                     if let Some(selected) = self.visible.iter().position(|item| *item == index) {
@@ -890,6 +956,15 @@ impl App {
         };
         let command = tokens.first().map(String::as_str).unwrap_or("");
         let args = tokens.get(1..).unwrap_or(&[]);
+        if matches!(
+            command.to_ascii_lowercase().as_str(),
+            "q" | "quit" | "close"
+        ) && (self.module_widget.is_some() || self.module_info.is_some())
+        {
+            self.close_module_view();
+            self.status = "module view closed".into();
+            return;
+        }
         if command.eq_ignore_ascii_case("mode") {
             self.set_view_mode(args);
             return;
@@ -913,6 +988,7 @@ impl App {
         }
         match command {
             "q" | "quit" => self.should_quit = true,
+            "close" => self.status = "no module view is open".into(),
             "tag" => {
                 let tags = split_tag_args(args);
                 if tags.is_empty() {
@@ -1009,6 +1085,7 @@ impl App {
             },
             "reload" => match config::load(&self.paths) {
                 Ok(settings) => {
+                    self.close_module_view();
                     self.module_runtime.reset();
                     self.repeat = settings.repeat;
                     self.follow_playback = settings.follow_playback;
@@ -1046,7 +1123,7 @@ impl App {
                 }
             }
             _ => {
-                self.status = "commands: :mode, :search, :tag, :untag, :tags, :clear, :play, :stop, :repeat, :follow, :queue, :next, :prev, :set, :themes, :reload".into();
+                self.status = "commands: :mode, :search, :tag, :untag, :tags, :clear, :play, :stop, :repeat, :follow, :queue, :next, :prev, :set, :themes, :reload, :close".into();
             }
         }
     }
@@ -1560,6 +1637,7 @@ impl App {
                     self.module_info = None;
                     self.module_widget = None;
                 }
+                "playback" => self.handle_module_playback(&output.module, &output.data),
                 "rescan" => match scan(&self.paths) {
                     Ok(songs) => {
                         self.songs = songs;
@@ -1578,6 +1656,109 @@ impl App {
             }
         }
         changed
+    }
+
+    fn handle_module_playback(&mut self, module: &str, data: &serde_json::Value) {
+        let action = data
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("restart");
+        if let (Some(song_id), Some(index)) = (
+            data.get("song_id")
+                .or_else(|| data.get("id"))
+                .and_then(serde_json::Value::as_str),
+            self.playing,
+        ) {
+            if song_id != self.songs[index].info.id {
+                self.status = format!("module {module}: playback request is stale");
+                return;
+            }
+        }
+        match action {
+            "pause" => {
+                let Some(player_process) = self.player.as_ref() else {
+                    self.status = format!("module {module}: nothing is playing");
+                    return;
+                };
+                if self.paused {
+                    self.status = format!("module {module}: playback is already paused");
+                } else {
+                    match player::pause(player_process) {
+                        Ok(()) => {
+                            self.paused = true;
+                            self.paused_at = Some(Instant::now());
+                            self.status = format!("module {module}: paused");
+                        }
+                        Err(error) => self.status = error,
+                    }
+                }
+            }
+            "resume" => {
+                let Some(player_process) = self.player.as_ref() else {
+                    self.status = format!("module {module}: nothing is playing");
+                    return;
+                };
+                if !self.paused {
+                    self.status = format!("module {module}: playback is already running");
+                } else {
+                    match player::resume(player_process) {
+                        Ok(()) => {
+                            if let (Some(started), Some(paused_at)) =
+                                (self.playback_started, self.paused_at)
+                            {
+                                self.playback_started = Some(started + paused_at.elapsed());
+                            }
+                            self.paused = false;
+                            self.paused_at = None;
+                            self.status = format!("module {module}: resumed");
+                        }
+                        Err(error) => self.status = error,
+                    }
+                }
+            }
+            "stop" => self.stop_playback(),
+            "restart" | "seek" | "set_filter" | "clear_filter" | "reset" => {
+                let audio_filter = match module_audio_filter(data) {
+                    Ok(filter) => filter,
+                    Err(error) => {
+                        self.status = format!("module {module}: {error}");
+                        return;
+                    }
+                };
+                let audio_filter = if matches!(action, "clear_filter" | "reset") {
+                    None
+                } else if data.get("audio_filter").is_some() {
+                    audio_filter
+                } else {
+                    self.audio_filter.clone()
+                };
+                let Some(index) = self.playing else {
+                    self.audio_filter = audio_filter;
+                    self.status = format!("module {module}: playback filter stored");
+                    return;
+                };
+                let offset = data
+                    .get("offset_seconds")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_else(|| self.playback_elapsed());
+                let was_paused = self.paused;
+                self.start_song_at_with_filter(index, offset, audio_filter);
+                if was_paused {
+                    if let Some(player_process) = self.player.as_ref() {
+                        if player::pause(player_process).is_ok() {
+                            self.paused = true;
+                            self.paused_at = Some(Instant::now());
+                        }
+                    }
+                }
+                self.status = match action {
+                    "clear_filter" | "reset" => format!("module {module}: audio filter cleared"),
+                    "seek" => format!("module {module}: playback position updated"),
+                    _ => format!("module {module}: playback restarted"),
+                };
+            }
+            other => self.status = format!("module {module}: unknown playback action {other}"),
+        }
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>) {
@@ -1736,6 +1917,19 @@ impl App {
         }
         if let Some(widget) = self.module_widget.as_ref() {
             self.draw_module_widget(frame, palette, widget);
+        }
+        if self.input_mode == InputMode::Command {
+            let prompt = Rect::new(
+                frame.area().x,
+                frame.area().bottom().saturating_sub(1),
+                frame.area().width,
+                1,
+            );
+            frame.render_widget(
+                Paragraph::new(format!("{}{}", self.input_prefix, self.input))
+                    .style(Style::default().fg(palette.muted).bg(palette.background)),
+                prompt,
+            );
         }
     }
 
@@ -2070,6 +2264,32 @@ fn parse_color(value: &str, fallback: Color) -> Color {
     }
 }
 
+fn module_audio_filter(data: &serde_json::Value) -> Result<Option<String>, String> {
+    let Some(value) = data.get("audio_filter") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(filter) = value.as_str() else {
+        return Err("audio_filter must be a string or null".into());
+    };
+    let filter = filter.trim();
+    if filter.is_empty() {
+        return Ok(None);
+    }
+    if filter.len() > 4096 {
+        return Err("audio_filter is too long (maximum 4096 bytes)".into());
+    }
+    if filter
+        .chars()
+        .any(|character| character == '\0' || character == '\n' || character == '\r')
+    {
+        return Err("audio_filter contains a forbidden control character".into());
+    }
+    Ok(Some(filter.to_string()))
+}
+
 fn key_name(key: &KeyEvent) -> String {
     let base = match key.code {
         KeyCode::Char(character) => character.to_string(),
@@ -2210,9 +2430,9 @@ fn split_tag_args(args: &[String]) -> Vec<String> {
 
 fn command_names() -> &'static [&'static str] {
     &[
-        "add", "clear", "enqueue", "next", "prev", "play", "q", "queue", "quit", "rescan", "mode",
-        "follow", "modules", "reload", "repeat", "search", "set", "themes", "stop", "tag", "tags",
-        "untag",
+        "add", "clear", "close", "enqueue", "next", "prev", "play", "q", "queue", "quit", "rescan",
+        "mode", "follow", "modules", "reload", "repeat", "search", "set", "themes", "stop", "tag",
+        "tags", "untag",
     ]
 }
 
@@ -2458,14 +2678,16 @@ fn centered_cover(area: Rect, requested_width: u16, font_size: (u16, u16)) -> Re
 #[cfg(test)]
 mod tests {
     use super::{
-        next_visible_queue_position, parse_command_line, previous_visible_queue_position,
-        split_tag_args, App, InputMode, ViewMode,
+        module_audio_filter, next_visible_queue_position, parse_command_line,
+        previous_visible_queue_position, split_tag_args, App, InputMode, ViewMode,
     };
     use crate::config::Settings;
     use crate::library::{Song, SongInfo};
     use crate::paths::AppPaths;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::style::Color;
     use std::fs;
+    use std::time::Instant;
     use tempfile::tempdir;
 
     #[test]
@@ -2482,6 +2704,71 @@ mod tests {
             split_tag_args(&["Rock,night".into(), "rock".into()]),
             vec!["night", "rock"]
         );
+    }
+
+    #[test]
+    fn module_audio_filter_accepts_text_and_rejects_unsafe_shape() {
+        assert_eq!(
+            module_audio_filter(&serde_json::json!({"audio_filter": "atempo=0.8"})).unwrap(),
+            Some("atempo=0.8".into())
+        );
+        assert_eq!(
+            module_audio_filter(&serde_json::json!({"audio_filter": null})).unwrap(),
+            None
+        );
+        assert!(module_audio_filter(&serde_json::json!({"audio_filter": 3})).is_err());
+        assert!(module_audio_filter(&serde_json::json!({
+            "audio_filter": "atempo=0.8\nvolume=2"
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn module_views_use_the_shared_command_line_to_close() {
+        let temp = tempdir().unwrap();
+        let paths = AppPaths {
+            config_dir: temp.path().join("config"),
+            settings_file: temp.path().join("config/settings.json"),
+            data_dir: temp.path().join("data"),
+            songs_dir: temp.path().join("data/songs"),
+            cache_dir: temp.path().join("cache"),
+        };
+        let mut app = App::new(paths, Settings::default(), Vec::new());
+        app.module_widget = Some(crate::modules::ModuleWidgetNode {
+            module: "demo".into(),
+            kind: "paragraph".into(),
+            title: String::new(),
+            text: String::new(),
+            lines: Vec::new(),
+            value: 0.0,
+            max: 1.0,
+            direction: "column".into(),
+            flex: 1,
+            children: Vec::new(),
+        });
+        app.handle_key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+        assert_eq!(app.input_mode, InputMode::Command);
+        app.input = "q".into();
+        app.execute_command();
+        assert!(app.module_widget.is_none());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn escape_in_normal_mode_cancels_pending_input_without_quitting() {
+        let temp = tempdir().unwrap();
+        let paths = AppPaths {
+            config_dir: temp.path().join("config"),
+            settings_file: temp.path().join("config/settings.json"),
+            data_dir: temp.path().join("data"),
+            songs_dir: temp.path().join("data/songs"),
+            cache_dir: temp.path().join("cache"),
+        };
+        let mut app = App::new(paths, Settings::default(), Vec::new());
+        app.pending_g = true;
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!app.pending_g);
+        assert!(!app.should_quit);
     }
 
     #[test]
@@ -2759,5 +3046,66 @@ mod tests {
             .unwrap();
         assert!(app.receive_module_outputs());
         assert!(app.module_widget.is_none());
+    }
+
+    #[test]
+    fn module_playback_response_updates_the_generic_audio_filter() {
+        let temp = tempdir().unwrap();
+        let paths = AppPaths {
+            config_dir: temp.path().join("config"),
+            settings_file: temp.path().join("config/settings.json"),
+            data_dir: temp.path().join("data"),
+            songs_dir: temp.path().join("data/songs"),
+            cache_dir: temp.path().join("cache"),
+        };
+        let audio = temp.path().join("song.mp3");
+        fs::write(&audio, b"audio").unwrap();
+        let song = Song {
+            info: SongInfo {
+                id: "1".into(),
+                artist: "Artist".into(),
+                lyrics: String::new(),
+                title: "Song".into(),
+                album: String::new(),
+                description: String::new(),
+                image: String::new(),
+                tags: Vec::new(),
+                duration_seconds: 100,
+                added_at: String::new(),
+            },
+            directory: temp.path().to_path_buf(),
+            audio,
+            image: None,
+            lyrics: None,
+        };
+        let settings = Settings {
+            player_command: "true {audio_filter} {file}".into(),
+            ..Settings::default()
+        };
+        let mut app = App::new(paths, settings, vec![song]);
+        app.playing = Some(0);
+        app.playback_started = Some(Instant::now());
+        app.module_runtime
+            .output_sender()
+            .send(crate::modules::ModuleOutput {
+                module: "effect".into(),
+                kind: "playback".into(),
+                title: String::new(),
+                text: String::new(),
+                lines: Vec::new(),
+                value: 0.0,
+                max: 0.0,
+                data: serde_json::json!({
+                    "type": "playback",
+                    "action": "set_filter",
+                    "song_id": "1",
+                    "audio_filter": "atempo=0.8"
+                }),
+                flush: true,
+                widget: None,
+            })
+            .unwrap();
+        assert!(app.receive_module_outputs());
+        assert_eq!(app.audio_filter.as_deref(), Some("atempo=0.8"));
     }
 }

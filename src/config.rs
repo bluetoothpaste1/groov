@@ -162,7 +162,7 @@ impl Default for Settings {
             refresh_ms: 100,
             theme: "monochrome".into(),
             image_mode: "auto".into(),
-            player_command: "ffplay -nodisp -autoexit -loglevel quiet {file}".into(),
+            player_command: MPV_PLAYER_COMMAND.into(),
             skip_seconds: 5,
             repeat: false,
             follow_playback: false,
@@ -189,6 +189,7 @@ impl Default for KeymapConfig {
 pub fn load(paths: &AppPaths) -> Result<Settings, ConfigError> {
     if !paths.settings_file.exists() {
         let mut settings = Settings::default();
+        normalize_player_command(&mut settings);
         load_module_manifests(paths, &mut settings)?;
         load_theme_files(paths, &mut settings)?;
         return Ok(settings);
@@ -203,13 +204,18 @@ pub fn load(paths: &AppPaths) -> Result<Settings, ConfigError> {
             path: path.clone(),
             source,
         })?;
+    normalize_player_command(&mut settings);
     load_module_manifests(paths, &mut settings)?;
     load_theme_files(paths, &mut settings)?;
     Ok(settings)
 }
 
 pub fn write_default(paths: &AppPaths) -> Result<(), ConfigError> {
-    write_settings(paths, &Settings::default())
+    let settings = Settings {
+        player_command: preferred_player_command(),
+        ..Settings::default()
+    };
+    write_settings(paths, &settings)
 }
 
 pub fn write_settings(paths: &AppPaths, settings: &Settings) -> Result<(), ConfigError> {
@@ -234,6 +240,34 @@ pub fn ensure(paths: &AppPaths) -> Result<Settings, ConfigError> {
         write_default(paths)?;
     }
     load(paths)
+}
+
+const MPV_PLAYER_COMMAND: &str =
+    "mpv --no-video --no-terminal --audio-pitch-correction=yes --input-ipc-server={player_ipc} {file}";
+const FFPLAY_PLAYER_COMMAND: &str = "ffplay -nodisp -autoexit -loglevel quiet {file}";
+
+fn preferred_player_command() -> String {
+    if executable_available("mpv") {
+        MPV_PLAYER_COMMAND.into()
+    } else {
+        FFPLAY_PLAYER_COMMAND.into()
+    }
+}
+
+fn normalize_player_command(settings: &mut Settings) {
+    if settings.player_command == MPV_PLAYER_COMMAND && !executable_available("mpv") {
+        settings.player_command = FFPLAY_PLAYER_COMMAND.into();
+    } else if settings.player_command == FFPLAY_PLAYER_COMMAND && executable_available("mpv") {
+        settings.player_command = MPV_PLAYER_COMMAND.into();
+    }
+}
+
+fn executable_available(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .map(|directory| directory.join(name))
+        .any(|path| path.is_file())
 }
 
 /// Load standalone modules from `~/.config/groov/modules/<name>/module.json`.
@@ -462,7 +496,7 @@ fn default_image_mode() -> String {
     "auto".into()
 }
 fn default_player_command() -> String {
-    "ffplay -nodisp -autoexit -loglevel quiet {file}".into()
+    MPV_PLAYER_COMMAND.into()
 }
 fn default_skip_seconds() -> u64 {
     5
@@ -602,6 +636,11 @@ mod tests {
     }
 
     #[test]
+    fn default_player_template_supports_live_backend_control() {
+        assert!(Settings::default().player_command.contains("{player_ipc}"));
+    }
+
+    #[test]
     fn reference_module_manifest_has_extension_contract() {
         let module: super::ModuleConfig =
             serde_json::from_str(include_str!("../examples/modules/hello/module.json")).unwrap();
@@ -630,12 +669,18 @@ mod tests {
             serde_json::from_str(include_str!("../basic_modules/flame/module.json")).unwrap();
         let easyadd: super::ModuleConfig =
             serde_json::from_str(include_str!("../basic_modules/easyadd/module.json")).unwrap();
+        let speedr: super::ModuleConfig =
+            serde_json::from_str(include_str!("../basic_modules/speedr/module.json")).unwrap();
         assert!(flame.rpc && flame.session);
         assert_eq!(flame.commands[0].name, "flame");
         assert_eq!(flame.events, vec!["command:flame"]);
         assert!(easyadd.rpc && easyadd.session);
         assert_eq!(easyadd.commands[0].name, "easyadd");
         assert_eq!(easyadd.events, vec!["command:easyadd"]);
+        assert!(speedr.rpc && speedr.session);
+        assert_eq!(speedr.commands[0].name, "speedr");
+        assert_eq!(speedr.keys.get("s").map(String::as_str), Some("speedr"));
+        assert!(speedr.events.iter().any(|event| event == "play"));
     }
 
     #[test]

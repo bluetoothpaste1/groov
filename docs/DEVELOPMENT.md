@@ -23,7 +23,7 @@
 | src/modules.rs | event hooks, command aliases, environment contract |
 | src/tui.rs | app state, input dispatch, command parser, rendering, image worker |
 | examples/modules/hello | reference extension |
-| basic_modules | independent flame and easyadd extension examples |
+| basic_modules | independent flame, easyadd, and speedr extension examples |
 | packaging/groov.1 | installed manual page |
 | install.sh | portable release installer for a user-selected prefix |
 | scripts/check_docs.py | dependency-free documentation check |
@@ -209,6 +209,8 @@ Unit tests находятся рядом с Rust-модулем в cfg(test). П
 - on/off writes settings;
 - info includes source path;
 - command alias/key action remains wired.
+
+Python module tests run with `python3 basic_modules/speedr/test_speedr.py`; `make test` includes this check after the Rust suite.
 
 ### TUI smoke
 

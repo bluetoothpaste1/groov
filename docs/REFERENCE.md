@@ -148,7 +148,7 @@ themes_dir   = CONFIG_HOME/groov/themes
   "refresh_ms": 100,
   "theme": "monochrome",
   "image_mode": "auto",
-  "player_command": "ffplay -nodisp -autoexit -loglevel quiet {file}",
+  "player_command": "mpv --no-video --no-terminal --audio-pitch-correction=yes --input-ipc-server={player_ipc} {file}",
   "skip_seconds": 5,
   "repeat": false,
   "follow_playback": false,
@@ -171,7 +171,7 @@ themes_dir   = CONFIG_HOME/groov/themes
 | `refresh_ms` | unsigned integer | `100` | интервал опроса событий; фактически не меньше 50 ms |
 | `theme` | string | `monochrome` | активная тема |
 | `image_mode` | string | `auto` | `auto`, `ansi`, `sixel`, `kitty`, `iterm2`, `none` |
-| `player_command` | string | ffplay command | shell command audio backend |
+| `player_command` | string | mpv live command when available, otherwise ffplay | shell command audio backend |
 | `skip_seconds` | unsigned integer | `5` | шаг `h/l` |
 | `repeat` | boolean | `false` | повтор текущего трека |
 | `follow_playback` | boolean | `false` | перемещать выделение к начавшему играть треку |
@@ -278,9 +278,13 @@ ID каталога считается authoritative. Tags normalized to lowerca
 
 1. подставляет `{file}` shell-quoted путём;
 2. подставляет `{start}` числом секунд;
-3. если `{file}` отсутствует, добавляет quoted path в конец;
-4. если выполняется seek и команда содержит `ffplay`, а `{start}` отсутствует, добавляет `ffplay -ss N`;
-5. запускает команду с `exec`, чтобы signal pause/stop адресовался реальному player process.
+3. подставляет `{audio_filter}` как `-af 'FILTER'`, либо пустую строку без активного фильтра;
+4. подставляет `{player_ipc}` путём локального IPC endpoint;
+5. если `{file}` отсутствует, добавляет quoted path в конец;
+6. если выполняется seek и команда содержит `ffplay`, а `{start}` отсутствует, добавляет `ffplay -ss N`;
+7. запускает команду с `exec`, чтобы signal pause/stop адресовался реальному player process.
+
+Модули могут менять эти параметры через JSONL response `type: "playback"`; полный контракт и список действий находятся в [MODULES.md](MODULES.md). Если `{audio_filter}` не указан, непустой фильтр автоматически добавляется как `-af` только для команд, содержащих `ffplay`; другие backend-команды должны явно предоставить placeholder отдельным аргументом.
 
 stdin, stdout и stderr процесса изолированы. Пауза/продолжение используют `SIGSTOP`/`SIGCONT` на Unix. На других платформах pause/resume может быть недоступен.
 
@@ -295,6 +299,7 @@ stdin, stdout и stderr процесса изолированы. Пауза/пр
 | `GROOV_EVENT_JSON` | JSON object с event и song fields |
 | `GROOV_SONG_ID` | ID, если есть song |
 | `GROOV_SONG_FILE` | absolute/normalized path, если есть song |
+| `GROOV_PLAYER_IPC` | путь к локальному control endpoint для backend, если он поддерживает IPC |
 
 Если module field `rpc` равен true, stdin/stdout используются JSONL protocol. При `session: true` один process принимает последовательность requests, включая input/key messages; request/response schema и declarative widgets описаны в [MODULES.md](MODULES.md).
 

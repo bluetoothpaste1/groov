@@ -8,13 +8,13 @@ Current release: `1.0.0`. See [CHANGELOG.md](CHANGELOG.md) for release notes and
 
 ### Dependencies
 
-For a normal source build you need Rust/Cargo and FFmpeg for playback. Python 3 is only needed for the optional `basic_modules` examples.
+For a normal source build you need Rust/Cargo and mpv for the recommended live playback path. FFmpeg/ffplay remains a fallback, and Python 3 is needed by the optional `basic_modules` modules.
 
 On Debian or Ubuntu:
 
 ```sh
 sudo apt update
-sudo apt install --yes ffmpeg python3
+sudo apt install --yes ffmpeg mpv python3
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 . "$HOME/.cargo/env"
 ```
@@ -23,7 +23,7 @@ On macOS:
 
 ```sh
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-brew install ffmpeg python
+brew install ffmpeg mpv python
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 . "$HOME/.cargo/env"
 ```
@@ -112,9 +112,9 @@ songs/13/lyrics.txt      optional
 
 ## Controls
 
-groov has two view modes: `NORMAL` shows the library and full playback controls, while `COMPACT` renders only the current track's cover. Use `:mode compact` to enter it and `:mode normal` to return. In compact mode `j/k` or the arrow keys immediately start the next/previous visible track, `h/l` seek, and `Space` pauses or resumes playback. The separate `COMMAND` input state opens with `:`; search and help are commands/panels. Normal mode uses `j/k` or arrow keys to move, `Space` to play/pause or start the selected track, `x` to stop, `h/l` to seek by the configured skip interval, `n`/`]` and `[` for queue navigation, `a` to enqueue, `/` to enter `:search`, `?` for help, and `q` to quit. Commands include `:mode normal|compact`, `:follow on|off`, `:tag live`, `:untag draft`, `:tags sad rock`, `:repeat on`, `:repeat off`, `:set title "New title"`, `:set desc "A favorite track"`, `:set artist "Rock group"`, `:set image ~/cover.jpg`, `:set lyrics ~/lyrics.txt`, `:set skips 10`, `:set coversize 16`, `:set theme ocean`, `:reload`, `:queue`, `:enqueue`, `:next`, `:prev`, `:clear`, `:play`, `:stop`, `:rescan`, and `:q`.
+groov has two view modes: `NORMAL` shows the library and full playback controls, while `COMPACT` renders only the current track's cover. Use `:mode compact` to enter it and `:mode normal` to return. In compact mode `j/k` or the arrow keys immediately start the next/previous visible track, `h/l` seek, and `Space` pauses or resumes playback. The separate `COMMAND` input state opens with `:`; search and help are commands/panels. Normal mode uses `j/k` or arrow keys to move, `Space` to play/pause or start the selected track, `x` to stop, `h/l` to seek by the configured skip interval, `n`/`]` and `[` for queue navigation, `a` to enqueue, `/` to enter `:search`, `?` for help, and `q` to quit. `Esc` cancels the current transient state and does not quit the application. Commands include `:mode normal|compact`, `:follow on|off`, `:tag live`, `:untag draft`, `:tags sad rock`, `:repeat on`, `:repeat off`, `:set title "New title"`, `:set desc "A favorite track"`, `:set artist "Rock group"`, `:set image ~/cover.jpg`, `:set lyrics ~/lyrics.txt`, `:set skips 10`, `:set coversize 16`, `:set theme ocean`, `:reload`, `:queue`, `:enqueue`, `:next`, `:prev`, `:clear`, `:play`, `:stop`, `:rescan`, and `:q`.
 
-Cover art is rendered by `ratatui-image` into one fixed square area. The full source image is scaled directly into that area without cropping or empty padding. `image_mode: "auto"` deliberately uses ANSI half blocks, which work in Linux and macOS terminals, SSH, tmux, and IDE terminals. Sixel, Kitty, and iTerm2 are explicit opt-ins (`sixel`, `kitty`, `iterm2`); `none` disables images. The audio command is configurable through `{file}` and `{start}`; its standard streams are isolated so backend output cannot corrupt the TUI. groov always restores raw mode and the alternate screen when the terminal or player exits with an error.
+Cover art is rendered by `ratatui-image` into one fixed square area. The full source image is scaled directly into that area without cropping or empty padding. `image_mode: "auto"` deliberately uses ANSI half blocks, which work in Linux and macOS terminals, SSH, tmux, and IDE terminals. Sixel, Kitty, and iTerm2 are explicit opt-ins (`sixel`, `kitty`, `iterm2`); `none` disables images. The audio command is configurable through `{file}`, `{start}`, and the module-facing `{audio_filter}` placeholder; its standard streams are isolated so backend output cannot corrupt the TUI. groov always restores raw mode and the alternate screen when the terminal or player exits with an error.
 
 While a track is playing, the TUI shows its elapsed time and progress bar. `h` and `l` seek backward or forward by `skip_seconds` (5 seconds by default); `:set skips 10` changes and persists that interval. `:repeat on` repeats the current track when it ends; `:repeat off` returns to normal queue progression. The repeat setting is persisted in `settings.json`.
 
@@ -122,11 +122,13 @@ While a track is playing, the TUI shows its elapsed time and progress bar. `h` a
 
 In command mode, `Tab` completes command names, `set` fields, and paths for `image`/`lyrics`. Path completion understands both absolute paths and `~/...`.
 
-Settings can enable external modules with `modules[].command`; they receive playback events through `GROOV_EVENT`, `GROOV_EVENT_JSON`, `GROOV_SONG_ID`, and `GROOV_SONG_FILE`. A module can expose command aliases (`commands`) and key bindings (`keys`), set environment variables (`env`), choose a working directory (`cwd`), enable JSONL RPC views (`rpc`), keep a streaming RPC process (`session`), and restrict events with `events`. RPC modules can return status, overlays, paragraphs, lists, gauges, declarative widget trees, input handling, and redraw messages to the TUI. Standalone modules are discovered from `~/.config/groov/modules/<name>/module.json` and use their manifest directory as the default working directory, so a module can be written in Rust, Python, Lua, shell, or any other language without changing groov. The module process contract is versioned with `GROOV_API_VERSION=1`.
+Interactive module views use the same command line: press `:` and use `:q` or `:close` to close the active view. Normal keys are forwarded to the module.
+
+Settings can enable external modules with `modules[].command`; they receive playback events through `GROOV_EVENT`, `GROOV_EVENT_JSON`, `GROOV_SONG_ID`, and `GROOV_SONG_FILE`. A module can expose command aliases (`commands`) and key bindings (`keys`), set environment variables (`env`), choose a working directory (`cwd`), enable JSONL RPC views (`rpc`), keep a streaming RPC process (`session`), and restrict events with `events`. RPC modules can return status, overlays, paragraphs, lists, gauges, declarative widget trees, input handling, generic playback actions, and redraw messages to the TUI. Standalone modules are discovered from `~/.config/groov/modules/<name>/module.json` and use their manifest directory as the default working directory, so a module can be written in Rust, Python, Lua, shell, or any other language without changing groov. The module process contract is versioned with `GROOV_API_VERSION=1`.
 
 Manage modules from COMMAND mode with `:modules` or `:modules list`, `:modules on NAME`, `:modules off NAME`, and `:modules info NAME`. For installed extensions, use `groov modules install DIRECTORY` (or `groov module add DIRECTORY`), `groov modules remove NAME`, and `groov modules enable|disable NAME`. The module panel shows the manifest path, working directory, metadata, commands, key bindings, events, and environment. A complete reference extension lives in [`examples/modules/hello`](examples/modules/hello).
 
-The repository also includes independent, ready-to-copy extensions in [`basic_modules`](basic_modules): `flame` animates border colors and `easyadd` provides an interactive track-import form.
+The repository also includes independent, ready-to-copy extensions in [`basic_modules`](basic_modules): `flame` animates border colors, `easyadd` provides an interactive track-import form, and `speedr` demonstrates generic playback control with live speed, pitch, and reverb changes.
 
 Themes are built in (`monochrome`, `ocean`, `gruvbox`, `nord`, `dracula`, `solarized`, `catppuccin`, `tokyo-night`, and `transparent`). Select one with `groov theme use NAME` or `:set theme NAME`; the choice is persisted in `settings.json`. Write a custom JSON theme and place it in `~/.config/groov/themes/<name>.json`, or install it with `groov theme install theme.json`. Files are loaded automatically and can be activated after `:reload`. `transparent` uses the terminal's own background (`reset`) with light-gray text and thin lines.
 

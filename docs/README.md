@@ -9,7 +9,7 @@
 - [Справочник конфигурации](REFERENCE.md) — точные поля `settings.json`, переменные окружения, форматы данных и CLI-команды.
 - [Руководство разработчика](DEVELOPMENT.md) — устройство исходников, сборка, тесты, изменение API и обязательные правила обновления документации.
 - [Архитектурные решения](ARCHITECTURE.md) — долговечные контракты хранения, расширений, рендера и выбора языка.
-- [`basic_modules`](../basic_modules/) — готовые out-of-tree примеры `flame` и `easyadd`.
+- [`basic_modules`](../basic_modules/) — готовые out-of-tree примеры `flame`, `easyadd` и `speedr`.
 - [Changelog](../CHANGELOG.md) — история релизов и release notes.
 - [License](../LICENSE) — лицензия MIT.
 

@@ -21,4 +21,10 @@ Use this section for changes after 1.0.0. Every behavior change must update the 
 - Added `groov uninstall` with explicit confirmation before removing the complete local groov data set.
 - Added Solarized, Catppuccin, Tokyo Night, and transparent built-in themes plus wrapped custom theme files.
 - Added `groov modules install/add`, `remove`, and `enable/disable` commands with a singular `groov module` alias.
+- Added the generic JSONL `playback` response contract for module-controlled restart, seek, filters, pause, resume, and stop actions.
+- Added the optional `basic_modules/speedr` extension with live 0–100 speed and pitch controls.
+- Unified module view input with the shared `:` command line and `:q`/`:close` lifecycle, and made `Esc` cancel instead of quitting NORMAL mode.
+- Added configurable speedr adjustment steps, selected-control highlighting, debounced filter restarts, and higher-quality fallback resampling.
+- Added the generic `{player_ipc}` / `GROOV_PLAYER_IPC` backend-control contract and an mpv live path for speedr, avoiding process restarts during adjustments.
+- Made mpv the preferred default backend when available, installed speedr automatically from `install.sh`, and kept ffplay as an automatic compatibility fallback.
 - Simplified the build and installation path to the Rust application target.
