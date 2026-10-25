@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 
@@ -126,17 +127,20 @@ def send_mpv(commands):
 
     if not PLAYER_IPC or os.name == "nt":
         return False
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            connection.settimeout(0.15)
-            connection.connect(PLAYER_IPC)
-            for command in commands:
-                connection.sendall(
-                    (json.dumps({"command": command}, separators=(",", ":")) + "\n").encode()
-                )
-        return True
-    except OSError:
-        return False
+    for attempt in range(3):
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(0.15)
+                connection.connect(PLAYER_IPC)
+                for command in commands:
+                    connection.sendall(
+                        (json.dumps({"command": command}, separators=(",", ":")) + "\n").encode()
+                    )
+            return True
+        except OSError:
+            if attempt < 2:
+                time.sleep(0.05)
+    return False
 
 
 def mpv_playback():

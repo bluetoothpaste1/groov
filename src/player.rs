@@ -95,6 +95,10 @@ pub fn stop(child: &mut Option<Child>) {
     *child = None;
 }
 
+pub fn clear_control_endpoint(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
+
 pub fn pause(child: &Child) -> Result<(), String> {
     send_signal(child, signal_pause())
 }

@@ -252,6 +252,7 @@ impl App {
         };
         let result = self.event_loop(&mut terminal);
         player::stop(&mut self.player);
+        player::clear_control_endpoint(&self.paths.player_ipc_path());
         let cursor_error = terminal.show_cursor().err();
         let screen_error = execute!(terminal.backend_mut(), Show, LeaveAlternateScreen).err();
         let raw_error = terminal::disable_raw_mode().err();
@@ -307,6 +308,7 @@ impl App {
                 self.image_cells = None;
                 self.image_pending = false;
                 self.image_generation = self.image_generation.wrapping_add(1);
+                player::clear_control_endpoint(&self.paths.player_ipc_path());
                 if self.repeat {
                     if let Some(index) = finished_song {
                         self.start_song_at(index, 0);
@@ -810,6 +812,7 @@ impl App {
         let current = self.playing.and_then(|index| self.songs.get(index));
         self.module_runtime.emit(&self.settings, "stop", current);
         player::stop(&mut self.player);
+        player::clear_control_endpoint(&self.paths.player_ipc_path());
         self.playing = None;
         self.playback_started = None;
         self.playback_offset_seconds = 0;
@@ -1063,6 +1066,7 @@ impl App {
             "rescan" => match scan(&self.paths) {
                 Ok(songs) => {
                     player::stop(&mut self.player);
+                    player::clear_control_endpoint(&self.paths.player_ipc_path());
                     self.songs = songs;
                     self.queue.clear();
                     self.queue_position = None;
